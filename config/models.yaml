@@ -1,0 +1,11 @@
+heavy:
+  model: "gemma4:31b-cloud"
+  base_url: "http://localhost:11434"
+  temperature_default: 0.2
+light:
+  model: "deepseek-r1:1.5b"
+  base_url: "http://localhost:11434"
+  temperature_default: 0.0
+routing:
+  light_tasks: ["classify", "extract", "format", "summarize"]
+  escalate_to_heavy_on_retry: true

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# Runtime / generated — keep dir, ignore contents (except .gitkeep/examples)
+workspace/jobs/*
+!workspace/jobs/.gitkeep
+workspace/problems/*
+!workspace/problems/.gitkeep
+!workspace/problems/examples/
+audit.jsonl
+registry.jsonl
+
+# Local env
+.env
+
+# OpenCode local plugin deps (auto-commit runs from source)
+.opencode/plugins/*/node_modules/

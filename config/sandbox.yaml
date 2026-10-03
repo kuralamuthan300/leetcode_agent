@@ -1,0 +1,18 @@
+timeout_ms: 2000
+total_timeout_s: 30
+memory: "256m"
+cpus: 1
+pids_limit: 64
+network: "none"
+read_only_rootfs: true
+image: "sandbox-img"
+work_mount: "/work"
+runner_user: "runner"
+allowed_imports:
+  - math
+  - heapq
+  - collections
+  - bisect
+  - itertools
+  - functools
+  - typing

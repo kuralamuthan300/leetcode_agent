@@ -25,6 +25,41 @@
       "action": "shell",
       "resource": "git rev-parse*",
       "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git diff*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git show*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git branch*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git reset*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git merge-base*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git for-each-ref*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "git merge --squash opencode/*",
+      "effect": "allow"
     }
   ]
 }

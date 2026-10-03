@@ -19,3 +19,15 @@ registry.jsonl
 
 # OpenCode local plugin deps (auto-commit runs from source)
 .opencode/plugins/*/node_modules/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

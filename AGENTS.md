@@ -4,6 +4,12 @@
 - `docs/architecture/LEETCODE_AGENT_PLAN.md` — architecture, JSON schemas, sandbox design.
 - `docs/build/BUILD_PLAN_STEP_BY_STEP.md` — build order. Implement exactly one Step per session (0–10), nothing else.
 - `docs/reports/` — optimizer before/after tables, E2E logs. `docs/security_tests.md` (Step 10).
+- `docs/reports/SESSION_STATE.md` — resume checkpoint. Read this second, after this file.
+
+## Startup (anti-reread, read ONLY these in order)
+1. `AGENTS.md` 2. `docs/reports/SESSION_STATE.md` 3. current Step section from `BUILD_PLAN_STEP_BY_STEP.md`.
+4. Allowlist = files named in current Step's Ask block. Do NOT `glob src/**`, `read` full dirs, or open `docs/architecture/*` unless the Step lists it. Use `grep` for symbols, `read` with `offset/limit` for sections.
+5. For lookups, delegate: `subagent explore/quick` returning function + lines only (≤10 lines), not full files to main context.
 
 ## Build rules
 - One step at a time. Stop after the Step's `Verify` command passes. If output overflows, continue same Step only — never merge Steps.

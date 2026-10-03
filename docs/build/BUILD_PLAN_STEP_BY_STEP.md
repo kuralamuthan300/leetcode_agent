@@ -4,6 +4,12 @@
 > Tell Build Mode: `Implement Step N from BUILD_PLAN_STEP_BY_STEP.md, nothing else.`
 > Do not skip steps. Verify each step before moving on.
 
+## Context Budget (anti-reread)
+- Per session, read: `AGENTS.md` + `docs/reports/SESSION_STATE.md` + current Step section only.
+- Allowlist = files named in that Step's `Ask Build Mode` block. Forbidden = everything else (including future Steps, `src/graph.py`, `src/llm_router.py` unless listed).
+- Prefer `grep` over `read` for discovery; use `read` with `offset/limit`. Delegate broad searches to `subagent explore/quick` (summary only).
+- End each Step by updating `docs/reports/SESSION_STATE.md`.
+
 Models:
 - Heavy: `gemma4:31b-cloud` (via Ollama) — reasoning, problem/solution generation.
 - Light: `deepseek-r1:1.5b` (via Ollama) — extraction, formatting, routing.

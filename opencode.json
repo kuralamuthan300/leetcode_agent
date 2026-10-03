@@ -60,6 +60,31 @@
       "action": "shell",
       "resource": "git merge --squash opencode/*",
       "effect": "allow"
+    },
+    {
+      "action": "read",
+      "resource": ".venv/*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": ".pytest_cache/*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "uv.lock",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "uv.lock",
+      "effect": "deny"
+    },
+    {
+      "action": "glob",
+      "resource": ".venv/*",
+      "effect": "deny"
     }
   ]
 }

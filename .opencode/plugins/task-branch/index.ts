@@ -95,6 +95,28 @@ function findWorktreeDir(root: string, branch: string): string | undefined {
   return undefined
 }
 
+export type TaskLiveInfo = {
+  slug: string
+  base: string
+  branch: string
+  directory: string
+  createdAt: string
+  branchExists: boolean
+  worktreeExists: boolean
+  dirty: boolean
+  ahead: number
+}
+
+export function formatTaskRow(t: TaskLiveInfo): string {
+  const flags = [
+    t.branchExists ? "branch:yes" : "branch:MISSING",
+    t.worktreeExists ? "worktree:yes" : "worktree:gone",
+    t.dirty ? "dirty:yes" : "clean",
+    `ahead:${t.ahead}`,
+  ].join(" ")
+  return `- ${t.slug} [${flags}]\n  base: ${t.base} branch: ${t.branch}\n  dir: ${t.directory}`
+}
+
 function branchFor(slug: string): string {
   return `${BRANCH_PREFIX}${slug}`
 }
@@ -234,6 +256,27 @@ export default Plugin.define({
       return `cleaned up task ${slug}: worktree ${directory} removed, branch ${branch} deleted (forced).`
     }
 
+    async function doList(): Promise<string> {
+      const tasks: TaskLiveInfo[] = []
+      let after: string | undefined
+      do {
+        const page = await ctx.storage.scan({ prefix: "task:", after, limit: 100 })
+        for (const e of page.entries) {
+          const slug = e.key.slice("task:".length)
+          const rec = e.value as unknown as TaskRecord
+          const branchExists = !!gitOk(root, ["rev-parse", "--verify", rec.branch])
+          const worktreeExists = fs.existsSync(rec.directory)
+          const wtStatus = worktreeExists ? (gitOk(rec.directory, ["status", "--porcelain"]) ?? "").trim() : ""
+          const log = branchExists ? (gitOk(root, ["log", "--oneline", `${rec.base}..${rec.branch}`]) ?? "") : ""
+          const ahead = log.trim() ? log.trim().split("\n").length : 0
+          tasks.push({ slug, ...rec, branchExists, worktreeExists, dirty: !!wtStatus, ahead })
+        }
+        after = page.next
+      } while (after)
+      if (!tasks.length) return "no active tasks (storage empty). Start one with /task-start <slug>."
+      return `active tasks (${tasks.length}):\n` + tasks.map(formatTaskRow).join("\n")
+    }
+
     await ctx.tool.transform((editor) => {
       editor.namespace({ name: "task", description: "Task-branch worktree workflow" })
       editor.add({
@@ -294,6 +337,23 @@ export default Plugin.define({
           }
         },
       })
+      editor.add({
+        name: "list",
+        description: "List all active task slugs with branch/worktree status",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        options: { namespace: "task", codemode: true },
+        execute: async () => {
+          try {
+            return { content: await doList() }
+          } catch (e) {
+            return { content: `task_list failed: ${(e as Error).message}` }
+          }
+        },
+      })
     })
 
     await ctx.command.transform((editor) => {
@@ -351,6 +411,18 @@ export default Plugin.define({
             await ctx.session.prompt({ ...prompt, sessionID, delivery, text: out })
           } catch (e) {
             await ctx.session.prompt({ ...prompt, sessionID, delivery, text: `task-merge failed: ${(e as Error).message}` })
+          }
+        },
+      })
+      editor.add({
+        name: "task-list",
+        description: "List all active task slugs with branch/worktree status",
+        execute: async ({ sessionID, prompt, delivery }) => {
+          try {
+            const out = await doList()
+            await ctx.session.prompt({ ...prompt, sessionID, delivery, text: out })
+          } catch (e) {
+            await ctx.session.prompt({ ...prompt, sessionID, delivery, text: `task-list failed: ${(e as Error).message}` })
           }
         },
       })

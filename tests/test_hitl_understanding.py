@@ -46,6 +46,26 @@ GOOD_ORACLE = (
 BAD_ORACLE = "def two_sum(nums, target):\n    return []\n"
 
 
+def _doubtful_req(tmp_path):
+    """Requirements missing the constraints hint -> real doubt, must pause."""
+    req = json.loads(REQ_DEMO.read_text())
+    req.pop("constraints_hint", None)
+    req["job_id"] = "req_doubt01"
+    path = tmp_path / "requirements_doubt.json"
+    path.write_text(json.dumps(req))
+    return path
+
+
+def _doubtful_problem(tmp_path):
+    """Problem with a single testcase -> real doubt, must pause."""
+    prob = json.loads(PROBLEM_DEMO.read_text())
+    prob["testcases"] = prob["testcases"][:1]
+    prob["id"] = "two_sum_doubt01"
+    path = tmp_path / "problem_doubt.json"
+    path.write_text(json.dumps(prob))
+    return path
+
+
 def _audit_decisions(workdir):
     path = Path(workdir) / "audit.jsonl"
     if not path.is_file():
@@ -107,8 +127,9 @@ def _hermetic_solver(monkeypatch, tmp_path, code=GOOD_ORACLE):
 
 def test_creator_understanding_blocks_heavy_work(monkeypatch, tmp_path):
     h = _hermetic_creator(monkeypatch, tmp_path)
+    req_path = _doubtful_req(tmp_path)
     out = cg.creator_app.invoke(
-        {"requirements_path": str(REQ_DEMO), "require_understanding": True},
+        {"requirements_path": str(req_path), "require_understanding": True},
         config={"configurable": {"thread_id": "hitl-pause"}})
     assert out.get("pending_approval") == "understanding"
     assert out.get("needs_human") is True
@@ -121,19 +142,38 @@ def test_creator_understanding_blocks_heavy_work(monkeypatch, tmp_path):
 
 def test_creator_understanding_resume_continues(monkeypatch, tmp_path):
     h = _hermetic_creator(monkeypatch, tmp_path)
+    req_path = _doubtful_req(tmp_path)
     cfg = {"configurable": {"thread_id": "hitl-resume"}}
     cg.creator_app.invoke(
-        {"requirements_path": str(REQ_DEMO), "require_understanding": True},
+        {"requirements_path": str(req_path), "require_understanding": True},
         config=cfg)
     cg.creator_app.update_state(cfg, {"human_answer": "arrays only, n <= 100"})
     out = cg.creator_app.invoke(
-        {"requirements_path": str(REQ_DEMO)}, config=cfg)
+        {"requirements_path": str(req_path)}, config=cfg)
     assert not out.get("needs_human"), out.get("errors")
     assert out.get("pending_approval") is None
     assert Path(out["problem_path"]).is_file()
     drafts = h["prompts"].get("draft_problem", [])
     assert drafts and any("arrays only" in p for p in drafts), \
         "resume answer must reach draft_problem prompt"
+
+
+def test_creator_complete_reqs_auto_confirm(monkeypatch, tmp_path):
+    # No doubts (hint present, sane count) -> no pause, but the
+    # auto-confirm is still logged.
+    h = _hermetic_creator(monkeypatch, tmp_path)
+    out = cg.creator_app.invoke(
+        {"requirements_path": str(REQ_DEMO), "require_understanding": True},
+        config={"configurable": {"thread_id": "hitl-autopass"}})
+    assert not out.get("needs_human"), out.get("errors")
+    assert out.get("pending_approval") is None
+    assert "draft_problem" in h["calls"], "no doubts means straight to draft"
+    assert Path(out["problem_path"]).is_file()
+    decisions = _audit_decisions(out["workdir"])
+    confirmed = [e for e in decisions
+                 if e.get("decision") == "understanding_confirmed"]
+    assert confirmed and any("no open questions" in str(e.get("reason"))
+                             for e in confirmed)
 
 
 def test_creator_default_run_skips_gate(monkeypatch, tmp_path):
@@ -217,9 +257,10 @@ def test_creator_clarify_pause_and_resume(monkeypatch, tmp_path):
 
 def test_solver_understanding_pause_resume(monkeypatch, tmp_path):
     h = _hermetic_solver(monkeypatch, tmp_path)
+    prob_path = _doubtful_problem(tmp_path)
     cfg = {"configurable": {"thread_id": "hitl-solver-u"}}
     out = sg.solver_app.invoke(
-        {"problem_path": str(PROBLEM_DEMO), "require_understanding": True},
+        {"problem_path": str(prob_path), "require_understanding": True},
         config=cfg)
     assert out.get("pending_approval") == "understanding"
     assert out.get("needs_human") is True
@@ -227,7 +268,7 @@ def test_solver_understanding_pause_resume(monkeypatch, tmp_path):
 
     sg.solver_app.update_state(cfg, {"human_answer": "use a hashmap"})
     out2 = sg.solver_app.invoke(
-        {"problem_path": str(PROBLEM_DEMO)}, config=cfg)
+        {"problem_path": str(prob_path)}, config=cfg)
     assert not out2.get("needs_human"), out2.get("errors")
     assert out2["test_results"] and all(r["passed"] for r in out2["test_results"])
     inits = h["prompts"].get("initial_solution", [])

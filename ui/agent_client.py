@@ -297,3 +297,19 @@ def update_and_resume(
     cfg = {"configurable": {"thread_id": thread_id}}
     app.update_state(cfg, values)
     return app.invoke(payload, config=cfg)
+
+
+def pending_action(state: dict[str, Any]) -> str | None:
+    """Which HITL panel needs the user, if any.
+
+    Returns "understanding" | "clarify" | "final" | None. Pure helper so
+    the UI can route to a single action panel.
+    """
+    pending = (state or {}).get("pending_approval")
+    if pending == "understanding":
+        return "understanding"
+    if pending == "clarify":
+        return "clarify"
+    if pending in ("promote", "optimize"):
+        return "final"
+    return None

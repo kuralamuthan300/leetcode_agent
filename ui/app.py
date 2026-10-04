@@ -23,6 +23,7 @@ from ui.agent_client import (
     stages_for_mode,
     status_for_state,
     stream_run,
+    pending_action,
     understanding_card_data,
     update_and_resume,
 )
@@ -83,10 +84,13 @@ def _understanding_card(state: dict) -> None:
     if state.get("pending_approval") != "understanding":
         return
     card = understanding_card_data(state)
-    st.warning("HITL-1: confirm understanding before the agent drafts")
-    st.write(card["summary"])
-    if card["question"]:
-        st.write(f"Agent asks: {card['question']}")
+    st.warning("HITL-1: the agent has open questions — nothing runs until you answer")
+    with st.expander("My understanding (FYI)", expanded=False):
+        st.write(card["summary"])
+    st.markdown("**Questions for you:**")
+    for line in (card["question"] or "").splitlines():
+        if line.strip():
+            st.markdown(line)
     num = st.number_input("num_tests (editable)", min_value=1, max_value=50,
                           value=int(card.get("num_tests") or 8), step=1,
                           key="hitl_num_tests")
@@ -276,10 +280,17 @@ def main() -> None:
     completed: list[str] = st.session_state.get("completed_stages", [])
 
     _status_banner(state)
+    elapsed = st.session_state.get("last_elapsed_s")
+    if elapsed is not None:
+        st.caption(f"Last run took {elapsed:.1f}s")
 
-    _understanding_card(state)
-    _clarify_popup(state)
-    _final_approval_view(state)
+    action = pending_action(state)
+    if action is not None:
+        with st.container(border=True):
+            st.subheader("Action required")
+            _understanding_card(state)
+            _clarify_popup(state)
+            _final_approval_view(state)
 
     stages = stages_for_mode(
         mode if mode in ("creator", "solver") else "creator", include_hitl=True)
@@ -301,11 +312,21 @@ def main() -> None:
                 st.write(f"- {c}")
         if pdata.get("examples"):
             st.json(pdata["examples"])
+        if pdata.get("title"):
+            st.download_button(
+                "Download problem JSON",
+                data=json.dumps(state.get("problem_spec") or {}, indent=2),
+                file_name=f"{(state.get('problem_spec') or {}).get('id', 'problem')}.json",
+                mime="application/json", key="dl_problem")
     with tab_solution:
         code = solution_tab_data(state)
         if code:
             st.code(code, language="python")
-            st.button("copy", help="select code above to copy")
+            job = state.get("job_id") or "solution"
+            st.download_button(
+                "Download solution.py", data=code,
+                file_name=f"{job}_solution.py", mime="text/x-python",
+                key="dl_solution")
         else:
             st.write("(no solution yet)")
     with tab_tests:
@@ -342,8 +363,9 @@ def main() -> None:
 
                     invoke_payload = {"requirements_path": _save_tmp(req, "req"),
                                       "require_understanding": True}
-                    chunks = list(
-                        stream_run(creator_app, invoke_payload, thread_id))
+                    chunks = _stream_with_progress(
+                        creator_app, invoke_payload, thread_id,
+                        expected=len(stages_for_mode("creator", include_hitl=True)))
                     stages = stages_for_mode("creator", include_hitl=True)
                     completed = completed_stages_from_stream(chunks)
                     state = get_state(thread_id, app=creator_app)
@@ -364,8 +386,9 @@ def main() -> None:
 
                     invoke_payload = {"problem_path": _save_tmp(prob, "prob"),
                                       "require_understanding": True}
-                    chunks = list(
-                        stream_run(solver_app, invoke_payload, thread_id))
+                    chunks = _stream_with_progress(
+                        solver_app, invoke_payload, thread_id,
+                        expected=len(stages_for_mode("solver", include_hitl=True)))
                     stages = stages_for_mode("solver", include_hitl=True)
                     completed = completed_stages_from_stream(chunks)
                     state = get_state(thread_id, app=solver_app)
@@ -486,6 +509,28 @@ def build_problem(
         "constraints": [c for c in (constraints or []) if c.strip()],
         "testcases": testcases,
     }
+
+
+def _stream_with_progress(app, payload: dict, thread_id: str,
+                          expected: int) -> list[dict]:
+    """Consume app.stream with live stage updates; returns all chunks."""
+    import time
+
+    chunks: list[dict] = []
+    started = time.time()
+    with st.status("Starting agent…", expanded=True) as status:
+        for chunk in stream_run(app, payload, thread_id):
+            chunks.append(chunk)
+            names = completed_stages_from_stream(chunks)
+            current = names[-1] if names else "starting"
+            status.update(
+                label=f"Running: `{current}` "
+                      f"({len(names)}/{expected} stages, "
+                      f"{time.time() - started:.0f}s elapsed)")
+        status.update(label=f"Run finished in {time.time() - started:.1f}s",
+                      state="complete")
+    st.session_state["last_elapsed_s"] = time.time() - started
+    return chunks
 
 
 def _save_tmp(payload: dict, prefix: str) -> str:

@@ -46,7 +46,9 @@ GOOD_CODE = (
 
 REQ_5 = {"job_id": "req_e2e1301", "category": "arrays", "difficulty": "easy",
         "language": "python", "num_tests": 5,
-        "constraints_hint": "n <= 10^4", "extra": ""}
+        # No constraints_hint on purpose: the missing hint is the doubt
+        # that triggers the HITL-1 pause in these flows.
+        "constraints_hint": "", "extra": ""}
 
 
 def _hermetic(monkeypatch, tmp_path):
@@ -161,13 +163,19 @@ def test_creator_e2e_decline_path(monkeypatch, tmp_path):
 
 def test_solver_e2e_understanding_to_done(monkeypatch, tmp_path):
     _hermetic(monkeypatch, tmp_path)
-    paused = ac.run_solver(str(PROBLEM_DEMO), "e2e13-solver", app=sg.solver_app)
+    # Keep a single testcase so the solver has a real doubt and pauses.
+    prob = json.loads(PROBLEM_DEMO.read_text())
+    prob["testcases"] = prob["testcases"][:1]
+    prob["id"] = "two_sum_e2e13"
+    prob_path = tmp_path / "problem_e2e13.json"
+    prob_path.write_text(json.dumps(prob))
+    paused = ac.run_solver(str(prob_path), "e2e13-solver", app=sg.solver_app)
     assert paused.get("pending_approval") == "understanding"
     card = ac.understanding_card_data(paused)
     assert card["waiting"] is True
     assert "Two Sum" in card["summary"] or "two_sum" in card["summary"]
 
-    payload = {"problem_path": str(PROBLEM_DEMO),
+    payload = {"problem_path": str(prob_path),
                "require_understanding": True}
     final = ac.update_and_resume(
         sg.solver_app, "e2e13-solver",

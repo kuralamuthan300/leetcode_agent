@@ -337,7 +337,12 @@ Safety invariant: clarification never bypasses `static_scan` -> `safe_execute` o
 >   template renders, not light-LLM calls** — the gate must never depend on
 >   model availability, and legacy hermetic mocks only stub heavy tasks.
 > - Pauses are **flag-gated, not interrupt-gated**: `require_understanding=True`
->   enforces HITL-1, `allow_clarify=True` enables the mid-run clarify detour;
+>   means **"ask if doubtful"** — `summarize_*` emit only genuine doubts
+>   (creator: unknown category, missing `constraints_hint`, `num_tests`
+>   outside 3–20; solver: missing constraints, <2 testcases,
+>   signature/name mismatch) and the gate pauses only when `human_question`
+>   is non-empty, otherwise it auto-confirms and logs the reason.
+>   `allow_clarify=True` enables the mid-run clarify detour;
 >   both default off so headless runs stay non-blocking (same convention as
 >   the Step 10 `human_approved_*` gates). A pause ends the run at
 >   `flag_human` with `pending_approval` set; resume is `update_state` with

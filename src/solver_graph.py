@@ -156,9 +156,10 @@ def load_validate(state: SolverState) -> dict:
 
 
 def summarize_problem(state: SolverState) -> dict:
-    """Step 12 HITL-1: render interpreted problem + questions for review.
+    """Step 12 HITL-1: render interpreted problem + real doubts only.
 
     Deterministic (no LLM) so the gate never depends on model availability.
+    human_question is empty when there is nothing worth asking.
     """
     errors = _errors(state)
     spec = state.get("problem_spec") or {}
@@ -171,21 +172,35 @@ def summarize_problem(state: SolverState) -> dict:
         f"Constraints: {spec.get('constraints') or 'none'}. "
         "I will write a correct solution, then optimize it."
     )
+    doubts = []
+    if not spec.get("constraints"):
+        doubts.append(
+            "No constraints listed — what input sizes should the solution handle?"
+        )
+    if len(cases) < 2:
+        doubts.append(
+            f"Only {len(cases)} testcase(s) — is that enough to verify "
+            "correctness, or should I add edge cases?"
+        )
+    func = spec.get("function_name") or ""
+    if func and func not in (spec.get("signature") or ""):
+        doubts.append(
+            f"function_name '{func}' is missing from the signature — "
+            "what exact signature should I implement?"
+        )
     return {
         "understanding_summary": summary,
-        "human_question": (
-            "Confirm the signature/constraints above, or reply with corrections."
-        ),
+        "human_question": "\n".join(f"- {d}" for d in doubts),
         "errors": errors,
     }
 
 
 def request_understanding_approval(state: SolverState) -> dict:
-    """Step 12 HITL-1 gate: pause before any heavy LLM/Docker work.
+    """Step 12 HITL-1 gate: pause only when the agent has real questions.
 
     Resume with human_answer (or understanding_confirmed=True) to continue.
-    require_understanding=True enforces the pause; None/False auto-passes
-    for headless runs (legacy compat, mirroring Step 10 gates).
+    require_understanding=True means "ask if doubtful"; with no doubts the
+    gate auto-confirms and logs it. None/False auto-passes for headless runs.
     """
     errors = _errors(state)
     if state.get("human_answer") or state.get("understanding_confirmed"):
@@ -197,15 +212,24 @@ def request_understanding_approval(state: SolverState) -> dict:
             pass
         return {"pending_approval": None, "needs_human": False,
                 "understanding_confirmed": True, "errors": errors}
-    if state.get("require_understanding"):
-        errors.append("understanding: awaiting human confirm before solving")
+    if state.get("require_understanding") and state.get("human_question"):
+        errors.append("understanding: agent has open questions, awaiting human")
         try:
             log_decision(state.get("workdir"), stage="solver.understanding",
-                         decision="pending", reason="awaiting HITL-1 confirm")
+                         decision="pending", reason="awaiting HITL-1 answers")
         except Exception:
             pass
         return {"pending_approval": "understanding", "needs_human": True,
                 "errors": errors}
+    if state.get("require_understanding"):
+        try:
+            log_decision(state.get("workdir"), stage="solver.understanding",
+                         decision="understanding_confirmed",
+                         reason="no open questions")
+        except Exception:
+            pass
+        return {"pending_approval": None, "needs_human": False,
+                "understanding_confirmed": True, "errors": errors}
     return {"pending_approval": None, "errors": errors}
 
 

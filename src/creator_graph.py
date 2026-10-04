@@ -154,10 +154,15 @@ def intake_validate(state: CreatorState) -> dict:
     }
 
 
+KNOWN_CATEGORIES = {"arrays", "dp", "graphs", "strings", "math", "trees"}
+
+
 def summarize_understanding(state: CreatorState) -> dict:
-    """Step 12 HITL-1: render interpreted requirements + questions for review.
+    """Step 12 HITL-1: render interpreted requirements + real doubts only.
 
     Deterministic (no LLM) so the gate never depends on model availability.
+    human_question is empty when there is nothing worth asking — the
+    approval gate then auto-confirms instead of blocking.
     """
     errors = _errors(state)
     req = state.get("requirements") or {}
@@ -173,27 +178,38 @@ def summarize_understanding(state: CreatorState) -> dict:
         "I will draft a NEW original LeetCode-style problem with a snake_case "
         "function name, typed signature, 1-3 worked examples, and 2+ constraints."
     )
-    questions = []
+    doubts = []
+    if category not in KNOWN_CATEGORIES:
+        doubts.append(
+            f"Unknown category '{category}' — describe the topic "
+            f"(known: {sorted(KNOWN_CATEGORIES)})?"
+        )
     if not req.get("constraints_hint"):
-        questions.append(
+        doubts.append(
             "No constraints hint given — what max input size (n) should tests target?"
         )
-    questions.append(
-        "Confirm category/difficulty/num_tests, or reply with corrections."
-    )
+    try:
+        n = int(num_tests)
+    except (TypeError, ValueError):
+        n = 8
+    if n < 3 or n > 20:
+        doubts.append(
+            f"num_tests={n} is unusual (typical 3-20) — confirm the count?"
+        )
     return {
         "understanding_summary": summary,
-        "human_question": " ".join(questions),
+        "human_question": "\n".join(f"- {d}" for d in doubts),
         "errors": errors,
     }
 
 
 def request_understanding_approval(state: CreatorState) -> dict:
-    """Step 12 HITL-1 gate: pause before any heavy LLM/Docker work.
+    """Step 12 HITL-1 gate: pause only when the agent has real questions.
 
     Resume with human_answer (or understanding_confirmed=True) to continue.
-    require_understanding=True enforces the pause; None/False auto-passes
-    for headless runs (legacy compat, mirroring Step 10 gates).
+    require_understanding=True means "ask if doubtful": a non-empty
+    human_question pauses; with no doubts the gate auto-confirms and logs
+    it. None/False auto-passes for headless runs (legacy compat).
     """
     errors = _errors(state)
     if state.get("human_answer") or state.get("understanding_confirmed"):
@@ -205,15 +221,24 @@ def request_understanding_approval(state: CreatorState) -> dict:
             pass
         return {"pending_approval": None, "needs_human": False,
                 "understanding_confirmed": True, "errors": errors}
-    if state.get("require_understanding"):
-        errors.append("understanding: awaiting human confirm before drafting")
+    if state.get("require_understanding") and state.get("human_question"):
+        errors.append("understanding: agent has open questions, awaiting human")
         try:
             log_decision(state.get("workdir"), stage="creator.understanding",
-                         decision="pending", reason="awaiting HITL-1 confirm")
+                         decision="pending", reason="awaiting HITL-1 answers")
         except Exception:
             pass
         return {"pending_approval": "understanding", "needs_human": True,
                 "errors": errors}
+    if state.get("require_understanding"):
+        try:
+            log_decision(state.get("workdir"), stage="creator.understanding",
+                         decision="understanding_confirmed",
+                         reason="no open questions")
+        except Exception:
+            pass
+        return {"pending_approval": None, "needs_human": False,
+                "understanding_confirmed": True, "errors": errors}
     return {"pending_approval": None, "errors": errors}
 
 

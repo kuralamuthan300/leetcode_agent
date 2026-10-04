@@ -155,3 +155,13 @@ def test_build_problem_from_form():
                              [("[1, 2]", "1")])  # bare-list input rejected
     with pytest.raises(ValueError):
         appmod.build_problem("T", "two_sum", "def two_sum(x):", "s", [], [])
+
+
+def test_pending_action_routing():
+    assert ac.pending_action({}) is None
+    assert ac.pending_action(None) is None
+    assert ac.pending_action({"pending_approval": "understanding"}) == "understanding"
+    assert ac.pending_action({"pending_approval": "clarify"}) == "clarify"
+    assert ac.pending_action({"pending_approval": "promote"}) == "final"
+    assert ac.pending_action({"pending_approval": "optimize"}) == "final"
+    assert ac.pending_action({"pending_approval": None}) is None

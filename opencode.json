@@ -58,12 +58,12 @@
     },
     {
       "action": "shell",
-      "resource": "git merge --squash opencode/*",
+      "resource": "git merge --squash task/*",
       "effect": "allow"
     },
     {
       "action": "shell",
-      "resource": "git worktree*",
+      "resource": "git config*",
       "effect": "allow"
     },
     {

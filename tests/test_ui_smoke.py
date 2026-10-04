@@ -1,6 +1,12 @@
 """Smoke tests for Step 11 UI shell (mocked graph, no Ollama/Docker)."""
 
+import json
+
+import pytest
+
 from ui import agent_client as ac
+import ui.app as appmod
+from src.schemas import ProblemSpec, RequirementsSpec
 
 
 class FakeApp:
@@ -107,3 +113,45 @@ def test_tabs_render_data():
     assert by_id["t1"]["mean_ms"] == 1.2
     assert by_id["t_perf"]["mean_ms"] == 3.5
     assert set(rows[0].keys()) == {"test_id", "input", "expected", "actual", "pass", "mean_ms"}
+
+
+def test_build_requirements_from_form():
+    req = appmod.build_requirements("arrays", "easy", 5, "n <= 10^4", "extra notes")
+    spec = RequirementsSpec.model_validate(req)  # must satisfy Pydantic
+    assert spec.category == "arrays"
+    assert spec.num_tests == 5
+    assert spec.language == "python"
+    assert req["job_id"].startswith("req_")
+    with pytest.raises(ValueError):
+        appmod.build_requirements("", "easy", 8)
+    with pytest.raises(ValueError):
+        appmod.build_requirements("arrays", "insane", 8)
+    with pytest.raises(ValueError):
+        appmod.build_requirements("arrays", "easy", 0)
+
+
+def test_build_problem_from_form():
+    prob = appmod.build_problem(
+        "Two Sum", "two_sum",
+        "def two_sum(nums: list[int], target: int) -> list[int]:",
+        "Return indices adding to target.",
+        ["2 <= n <= 10^4", ""],
+        [('{"nums": [2, 7], "target": 9}', "[0, 1]"),
+         ("", "")],  # blank row skipped
+    )
+    spec = ProblemSpec.model_validate(prob)  # must satisfy Pydantic
+    assert spec.function_name == "two_sum"
+    assert [t.id for t in spec.testcases] == ["t1"]
+    assert spec.constraints == ["2 <= n <= 10^4"]
+    with pytest.raises(ValueError):
+        appmod.build_problem("T", "not a name!", "def x():", "s", [], [])
+    with pytest.raises(ValueError):
+        appmod.build_problem("T", "two_sum", "def other():", "s", [], [])
+    with pytest.raises(ValueError):
+        appmod.build_problem("T", "two_sum", "def two_sum(x):", "s", [],
+                             [("not json", "1")])
+    with pytest.raises(ValueError):
+        appmod.build_problem("T", "two_sum", "def two_sum(x):", "s", [],
+                             [("[1, 2]", "1")])  # bare-list input rejected
+    with pytest.raises(ValueError):
+        appmod.build_problem("T", "two_sum", "def two_sum(x):", "s", [], [])

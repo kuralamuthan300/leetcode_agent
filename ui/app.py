@@ -179,11 +179,11 @@ def main() -> None:
         with st.expander("What should I provide?", expanded=False):
             st.markdown(
                 "- **creator**: pick `category` + `difficulty` + `num_tests`, "
-                "optionally a `constraints_hint` (e.g. `n <= 10^5`). "
-                "No file needed — the agent drafts a new problem.\n"
-                "- **solver**: give a `problem_id_*.json` via upload, paste, "
-                "or the `two_sum_demo` example. Sidebar category/difficulty "
-                "are ignored.\n"
+                "optionally a `constraints_hint` (e.g. `n <= 10^5`) and "
+                "`extra` notes. No file needed — the agent drafts a new problem.\n"
+                "- **solver**: choose the `two_sum_demo` example or fill the "
+                "custom-problem form (`title`, `function_name`, `signature`, "
+                "`statement`, `constraints`, testcases as input/expected JSON).\n"
                 "- **auto**: same as creator (router dispatch is future work).\n"
                 "- **review**: read-only — enter the `job_id` of a past run "
                 "to inspect its state, `audit.jsonl`, and `report.md`."
@@ -191,45 +191,86 @@ def main() -> None:
         mode = st.radio(
             "mode",
             ["creator", "solver", "auto", "review"], index=0,
-            help="creator: requirements -> new problem JSON. "
-                 "solver: problem JSON -> solution + timings + report. "
+            help="creator: form fields -> new problem JSON. "
+                 "solver: example or custom form -> solution + timings. "
                  "auto: currently same as creator. "
                  "review: read-only inspection of a past job_id.")
-        category = st.selectbox(
-            "category", CATEGORIES, index=0,
-            help="Problem family to invent (e.g. arrays, dp, graphs). "
-                 "Used only in creator/auto mode.")
-        difficulty = st.radio(
-            "difficulty", ["easy", "medium", "hard"], index=0,
-            help="Target difficulty, enforced on the generated problem. "
-                 "Used only in creator/auto mode.")
-        num_tests = st.number_input(
-            "num_tests", min_value=1, max_value=50, value=8, step=1,
-            help="How many testcases to generate (default 8). "
-                 "Stored as RequirementsSpec.num_tests. You can still "
-                 "change it on the HITL-1 understanding card.")
-        st.caption("Tip: 8 is a good default; use 4–5 for a quick trial run.")
-        constraints_hint = st.text_input(
-            "constraints_hint", value="",
-            help="Free text like `n <= 10^5` or `must use O(1) space`. "
-                 "Shapes perf-test sizes. Optional — the agent asks on the "
-                 "understanding card if it is missing.")
-        uploaded = st.file_uploader(
-            "upload json", type=["json"],
-            help="Creator: a requirements JSON "
-                 "({job_id, category, difficulty, language, num_tests, "
-                 "constraints_hint, extra}). Solver: a problem_id_*.json. "
-                 "Leave empty to use the sidebar fields / example instead.")
-        st.caption("Solver expects a problem file; creator works without one.")
-        example_choice = st.selectbox(
-            "example picker", ["none", "two_sum_demo"], index=0,
-            help="Load the bundled Two Sum problem instead of uploading. "
-                 "Handy for trying solver mode instantly.")
-        pasted = st.text_area(
-            "or paste json here", height=120,
-            help="Paste a requirements JSON (creator) or problem JSON "
-                 "(solver). Takes precedence over the example picker when "
-                 "non-empty.")
+        # Defaults so the results section below always has values.
+        category, difficulty = "arrays", "easy"
+        num_tests, constraints_hint, extra, language = 8, "", "", "python"
+        solver_source = "example: two_sum_demo"
+        prob_title = prob_func = prob_sig = prob_stmt = ""
+        prob_constraints = ""
+        prob_rows: list[tuple[str, str]] = []
+        review_job_id = ""
+        if mode in ("creator", "auto"):
+            category = st.selectbox(
+                "category", CATEGORIES, index=0,
+                help="Problem family to invent (e.g. arrays, dp, graphs).")
+            difficulty = st.radio(
+                "difficulty", ["easy", "medium", "hard"], index=0,
+                help="Target difficulty, enforced on the generated problem.")
+            num_tests = st.number_input(
+                "num_tests", min_value=1, max_value=50, value=8, step=1,
+                help="How many testcases to generate (default 8). "
+                     "Stored as RequirementsSpec.num_tests. You can still "
+                     "change it on the HITL-1 understanding card.")
+            st.caption("Tip: 8 is a good default; use 4–5 for a quick trial run.")
+            language = st.selectbox(
+                "language", ["python"], index=0,
+                help="Solution language. Only python is supported.")
+            constraints_hint = st.text_input(
+                "constraints_hint", value="",
+                help="Free text like `n <= 10^5` or `must use O(1) space`. "
+                     "Shapes perf-test sizes. Optional — the agent asks on the "
+                     "understanding card if it is missing.")
+            extra = st.text_area(
+                "extra notes (optional)", height=60,
+                help="Anything else the problem must satisfy, e.g. "
+                     "`must run in O(n) time`.")
+        elif mode == "solver":
+            solver_source = st.radio(
+                "problem source",
+                ["example: two_sum_demo", "custom form"], index=0,
+                help="Try the bundled Two Sum instantly, or describe your "
+                     "own problem in the form below.")
+            if solver_source == "custom form":
+                prob_title = st.text_input(
+                    "title", value="",
+                    help="Short problem name, e.g. `Two Sum`.")
+                prob_func = st.text_input(
+                    "function_name", value="",
+                    help="snake_case python function to implement, "
+                         "e.g. `two_sum`.")
+                prob_sig = st.text_input(
+                    "signature", value="",
+                    help="Full typed signature defining function_name, e.g. "
+                         "`def two_sum(nums: list[int], target: int) -> list[int]:`.")
+                prob_stmt = st.text_area(
+                    "statement", height=80,
+                    help="What the function must compute, in plain words.")
+                prob_constraints = st.text_area(
+                    "constraints (one per line)", height=60,
+                    help="E.g. `2 <= n <= 10^4` newline `Only one valid answer exists.`.")
+                st.markdown("**testcases** — input/expected JSON per row "
+                            "(blank rows are skipped):")
+                for i in range(1, 5):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        raw_in = st.text_input(
+                            f"test {i} input", value="", key=f"tc_in_{i}",
+                            help='JSON object mapping parameter names to values, '
+                                 'e.g. `{"nums": [2, 7], "target": 9}`.')
+                    with c2:
+                        raw_exp = st.text_input(
+                            f"test {i} expected", value="", key=f"tc_exp_{i}",
+                            help="Expected return value as JSON, e.g. `[0, 1]`.")
+                    prob_rows.append((raw_in, raw_exp))
+        else:  # review
+            review_job_id = st.text_input(
+                "job_id", value="",
+                help="Thread id of a past run (shown in its status banner). "
+                     "Leave empty to reuse the current session state.")
 
     state: dict = st.session_state.get("agent_state", {})
     completed: list[str] = st.session_state.get("completed_stages", [])
@@ -278,7 +319,10 @@ def main() -> None:
                     spec_ids_hidden.add(tc.get("id"))
         if not show_hidden:
             rows = [r for r in rows if r["test_id"] not in spec_ids_hidden]
-        st.write(f"{len(rows)} testcases (num_tests={int(num_tests)})")
+        if mode in ("creator", "auto"):
+            st.write(f"{len(rows)} testcases (num_tests={int(num_tests)})")
+        else:
+            st.write(f"{len(rows)} testcases")
         st.dataframe(rows, use_container_width=True)
 
     col_run, col_refresh = st.columns(2)
@@ -286,22 +330,14 @@ def main() -> None:
         if st.button("Run"):
             thread_id = state.get("job_id") or "ui-job-1"
             try:
-                payload: dict = {}
-                if uploaded is not None:
-                    payload = json.loads(uploaded.getvalue().decode("utf-8"))
-                elif pasted.strip():
-                    payload = json.loads(pasted)
-                elif example_choice == "two_sum_demo":
-                    payload = _load_example_problem()
                 if mode in ("creator", "auto"):
-                    req = payload if payload else {
-                        "category": category,
-                        "difficulty": difficulty,
-                        "language": "python",
-                        "num_tests": int(num_tests),
-                        "constraints_hint": constraints_hint,
-                    }
-                    req.setdefault("num_tests", int(num_tests))
+                    try:
+                        req = build_requirements(
+                            category, difficulty, int(num_tests),
+                            constraints_hint, extra, language)
+                    except ValueError as exc:
+                        st.error(f"invalid requirements: {exc}")
+                        return
                     from src.creator_graph import creator_app
 
                     invoke_payload = {"requirements_path": _save_tmp(req, "req"),
@@ -314,7 +350,16 @@ def main() -> None:
                     st.session_state["last_payload"] = invoke_payload
                     st.session_state["last_mode"] = "creator"
                 elif mode == "solver":
-                    prob = payload if payload else _load_example_problem()
+                    if solver_source == "custom form":
+                        try:
+                            prob = build_problem(
+                                prob_title, prob_func, prob_sig, prob_stmt,
+                                prob_constraints.splitlines(), prob_rows)
+                        except ValueError as exc:
+                            st.error(f"invalid problem: {exc}")
+                            return
+                    else:
+                        prob = _load_example_problem()
                     from src.solver_graph import solver_app
 
                     invoke_payload = {"problem_path": _save_tmp(prob, "prob"),
@@ -329,6 +374,7 @@ def main() -> None:
                 else:  # review: read-only
                     from src.graph import build_graph
 
+                    thread_id = review_job_id.strip() or thread_id
                     state = get_state(thread_id, app=build_graph())
                 st.session_state["agent_state"] = state
                 st.session_state["completed_stages"] = completed
@@ -338,6 +384,108 @@ def main() -> None:
     with col_refresh:
         if st.button("Refresh state"):
             st.rerun()
+
+
+def _new_job_id(prefix: str) -> str:
+    import uuid
+
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def build_requirements(
+    category: str,
+    difficulty: str,
+    num_tests: int = 8,
+    constraints_hint: str = "",
+    extra: str = "",
+    language: str = "python",
+    job_id: str | None = None,
+) -> dict:
+    """Build a RequirementsSpec dict purely from form fields (no upload)."""
+    req = {
+        "job_id": job_id or _new_job_id("req"),
+        "category": (category or "").strip(),
+        "difficulty": difficulty,
+        "language": (language or "python").strip() or "python",
+        "num_tests": int(num_tests),
+        "constraints_hint": (constraints_hint or "").strip() or None,
+        "extra": (extra or "").strip() or None,
+    }
+    if not req["category"]:
+        raise ValueError("category is required")
+    if req["difficulty"] not in ("easy", "medium", "hard"):
+        raise ValueError("difficulty must be easy, medium, or hard")
+    if not 1 <= req["num_tests"] <= 100:
+        raise ValueError("num_tests must be between 1 and 100")
+    return req
+
+
+def build_problem(
+    title: str,
+    function_name: str,
+    signature: str,
+    statement: str,
+    constraints: list[str],
+    cases: list[tuple[str, str]],
+) -> dict:
+    """Build a ProblemSpec dict from form fields.
+
+    cases: list of (input_json, expected_json) raw strings, one per testcase.
+    """
+    import re
+
+    title = (title or "").strip()
+    function_name = (function_name or "").strip()
+    signature = (signature or "").strip()
+    statement = (statement or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    if not function_name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function_name):
+        raise ValueError("function_name must be a valid python identifier")
+    if not signature or function_name not in signature:
+        raise ValueError("signature must define function_name "
+                         f"(expected something like `def {function_name}(...)`)")
+    if not statement:
+        raise ValueError("statement is required")
+    parsed: list[tuple[object, object]] = []
+    for i, (raw_in, raw_exp) in enumerate(cases, start=1):
+        if not raw_in.strip() and not raw_exp.strip():
+            continue  # blank row = unused
+        try:
+            inp = json.loads(raw_in)
+        except Exception as exc:
+            raise ValueError(f"testcase {i}: input is not valid JSON: {exc}")
+        try:
+            exp = json.loads(raw_exp)
+        except Exception as exc:
+            raise ValueError(f"testcase {i}: expected is not valid JSON: {exc}")
+        if not isinstance(inp, dict):
+            raise ValueError(
+                f"testcase {i}: input must be a JSON object mapping "
+                f"parameter names to values (e.g. {{\"nums\": [2, 7]}})")
+        parsed.append((inp, exp))
+    if not parsed:
+        raise ValueError("add at least one testcase (input + expected JSON)")
+    slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "problem"
+    import uuid
+
+    pid = f"{slug}_{uuid.uuid4().hex[:6]}"
+    examples = [{"input": parsed[0][0], "output": parsed[0][1],
+                 "explanation": ""}]
+    testcases = [{"id": f"t{i}", "input": inp, "expected": exp,
+                  "is_hidden": False, "timeout_ms": 2000}
+                 for i, (inp, exp) in enumerate(parsed, start=1)]
+    return {
+        "id": pid,
+        "title": title,
+        "difficulty": "easy",
+        "statement": statement,
+        "function_name": function_name,
+        "signature": signature,
+        "examples": examples,
+        "constraints": [c for c in (constraints or []) if c.strip()],
+        "testcases": testcases,
+    }
 
 
 def _save_tmp(payload: dict, prefix: str) -> str:
@@ -350,7 +498,8 @@ def _save_tmp(payload: dict, prefix: str) -> str:
 
 
 # Thin re-exports so tests / external callers can use ui.app helpers.
-__all__ = ["main", "run_creator", "run_solver", "get_state"]
+__all__ = ["main", "run_creator", "run_solver", "get_state",
+           "build_requirements", "build_problem"]
 
 
 if __name__ == "__main__":

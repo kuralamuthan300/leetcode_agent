@@ -22,3 +22,9 @@ class AgentState(TypedDict, total=False):
     errors: list
     safety_flags: list
     needs_human: bool
+    # Step 10: human-approval gates (opt-in). None = legacy auto-approve
+    # (keeps Steps 6-9 tests green); explicit False = block for review.
+    human_approved_promote: bool | None
+    human_approved_opt: bool | None
+    pending_approval: str | None
+    audit_path: str | None

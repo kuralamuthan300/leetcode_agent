@@ -20,9 +20,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from src.checkpoints import get_checkpointer
 from src.llm_router import generate
 from src.schemas import ProblemSpec, RequirementsSpec, TestCase
 from src.state import AgentState
@@ -32,6 +32,7 @@ from src.tools.access_broker import (
     scoped_read,
     scoped_write,
 )
+from src.tools.audit import append_audit, log_decision, log_run, log_scan
 from src.tools.safe_executor import safe_execute
 from src.tools.static_scanner import scan
 
@@ -281,6 +282,11 @@ def oracle_solution(state: CreatorState) -> dict:
 def static_scan(state: CreatorState) -> dict:
     """Deterministic guard: AST scan oracle before it ever executes."""
     verdict = scan(state.get("solution_code") or "")
+    try:
+        log_scan(state.get("workdir"), stage="creator.static_scan",
+                 code=state.get("solution_code"), flags=verdict["flags"])
+    except Exception:
+        pass
     return {"safety_flags": verdict["flags"], "scan_safe": verdict["safe"]}
 
 
@@ -304,9 +310,15 @@ def run_tests(state: CreatorState) -> dict:
         errors.append(f"run_tests: executor error: {exc}")
         return {"errors": errors, "test_results": []}
     dumped = [r.model_dump() for r in results]
+    timings = [r["time_ms"] for r in dumped]
+    try:
+        log_run(workdir, stage="creator.run_tests", code=code,
+                results=dumped, timings=timings)
+    except Exception:
+        pass
     return {
         "test_results": dumped,
-        "timings_ms": [r["time_ms"] for r in dumped],
+        "timings_ms": timings,
         "errors": errors,
     }
 
@@ -352,7 +364,12 @@ def repair_solution(state: CreatorState) -> dict:
 
 
 def promote_save(state: CreatorState) -> dict:
-    """Validate final spec, save problem JSON to job dir, promote to problems/."""
+    """Validate final spec, save problem JSON to job dir, promote to problems/.
+
+    Step 10: writes audit.jsonl entry (code_hash, flags, timings) and
+    records approval state. Human approval is enforced in
+    request_promote_approval before this node runs.
+    """
     errors = _errors(state)
     try:
         prob = ProblemSpec.model_validate(state.get("problem_spec"))
@@ -371,11 +388,43 @@ def promote_save(state: CreatorState) -> dict:
     except Exception as exc:
         errors.append(f"promote: {exc}")
         return {"errors": errors, "needs_human": True}
+    try:
+        append_audit(str(state["workdir"]), {
+            "stage": "creator.promote_save",
+            "code_hash": digest,
+            "problem_id": prob.id,
+            "flags": list(state.get("safety_flags") or []),
+            "timings_ms": list(state.get("timings_ms") or []),
+            "decision": "promoted",
+            "approved": bool(state.get("human_approved_promote") is not False),
+        })
+    except Exception:
+        pass
     return {
         "problem_spec": prob.model_dump(),
         "problem_path": str(dest),
         "errors": errors,
     }
+
+
+def request_promote_approval(state: CreatorState) -> dict:
+    """Step 10 human approval gate before promote_save.
+
+    Explicit human_approved_promote=False blocks for review (needs_human).
+    None/True auto-passes for automated runs (legacy compat); prod CLI
+    should set False initially and resume with True after review, or use
+    build_creator_graph(with_interrupt=True) which pauses before promote.
+    """
+    errors = _errors(state)
+    if state.get("human_approved_promote") is False:
+        errors.append("promote: awaiting human approval")
+        try:
+            log_decision(state.get("workdir"), stage="creator.promote_approval",
+                         decision="pending", reason="human_approved_promote is False")
+        except Exception:
+            pass
+        return {"pending_approval": "promote", "needs_human": True, "errors": errors}
+    return {"pending_approval": None, "errors": errors}
 
 
 def flag_human(state: CreatorState) -> dict:
@@ -406,11 +455,21 @@ def route_after_scan(state: CreatorState) -> str:
 def route_after_tests(state: CreatorState) -> str:
     results = state.get("test_results") or []
     if results and all(r.get("passed") for r in results):
-        return "promote_save"
+        return "request_promote_approval"
     return _repair_or_human(state)
 
 
-def build_creator_graph() -> object:
+def route_after_promote_approval(state: CreatorState) -> str:
+    return "flag_human" if state.get("needs_human") else "promote_save"
+
+
+def build_creator_graph(checkpointer=None, with_interrupt: bool = False) -> object:
+    """Step 10: SqliteSaver persistence + optional human interrupt.
+
+    with_interrupt=True pauses before promote_save for manual review.
+    Default False keeps automated runs non-blocking (approval gate still
+    blocks when human_approved_promote is explicitly False).
+    """
     builder = StateGraph(CreatorState)
     builder.add_node("intake_validate", intake_validate)
     builder.add_node("draft_problem", draft_problem)
@@ -419,6 +478,7 @@ def build_creator_graph() -> object:
     builder.add_node("oracle_solution", oracle_solution)
     builder.add_node("static_scan", static_scan)
     builder.add_node("run_tests", run_tests)
+    builder.add_node("request_promote_approval", request_promote_approval)
     builder.add_node("promote_save", promote_save)
     builder.add_node("repair_solution", repair_solution)
     builder.add_node("flag_human", flag_human)
@@ -436,12 +496,24 @@ def build_creator_graph() -> object:
          "flag_human": "flag_human"})
     builder.add_conditional_edges(
         "run_tests", route_after_tests,
-        {"promote_save": "promote_save", "repair_solution": "repair_solution",
+        {"request_promote_approval": "request_promote_approval",
+         "repair_solution": "repair_solution",
          "flag_human": "flag_human"})
+    builder.add_conditional_edges(
+        "request_promote_approval", route_after_promote_approval,
+        {"promote_save": "promote_save", "flag_human": "flag_human"})
     builder.add_edge("repair_solution", "oracle_solution")
     builder.add_edge("promote_save", END)
     builder.add_edge("flag_human", END)
-    return builder.compile(checkpointer=MemorySaver())
+    saver = checkpointer or get_checkpointer()
+    if with_interrupt:
+        return builder.compile(checkpointer=saver, interrupt_before=["promote_save"])
+    return builder.compile(checkpointer=saver)
 
 
 creator_app = build_creator_graph()
+
+
+def build_creator_graph_strict() -> object:
+    """Prod graph pausing before promote_save for human approval."""
+    return build_creator_graph(with_interrupt=True)

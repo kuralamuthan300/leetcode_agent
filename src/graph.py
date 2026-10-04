@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from src.checkpoints import get_checkpointer
 from src.state import AgentState
 
 Route = Literal["creator", "solver"]
@@ -46,8 +46,14 @@ def solver_node(state: AgentState) -> dict:
     return {"mode": "solver", "errors": errors}
 
 
-def build_graph() -> object:
-    """Build and compile START->router->creator/solver->END with MemorySaver."""
+def build_graph(checkpointer=None, with_interrupt: bool = False) -> object:
+    """Build and compile START->router->creator/solver->END with SqliteSaver.
+
+    Step 10: persistent SqliteSaver (in-memory by default, file via
+    LEETCODE_CHECKPOINT_DB). with_interrupt=True adds human-in-loop
+    gates (interrupt_before creator/solver) for prod; default False
+    keeps automated tests non-blocking.
+    """
     builder = StateGraph(AgentState)
     builder.add_node("router", router_node)
     builder.add_node("creator", creator_node)
@@ -56,10 +62,18 @@ def build_graph() -> object:
     builder.add_conditional_edges("router", route_after_router, {"creator": "creator", "solver": "solver"})
     builder.add_edge("creator", END)
     builder.add_edge("solver", END)
-    return builder.compile(checkpointer=MemorySaver())
+    saver = checkpointer or get_checkpointer()
+    if with_interrupt:
+        return builder.compile(checkpointer=saver, interrupt_before=["creator", "solver"])
+    return builder.compile(checkpointer=saver)
 
 
 app = build_graph()
+
+
+def build_graph_strict() -> object:
+    """Prod graph with human approval interrupts before each branch."""
+    return build_graph(with_interrupt=True)
 
 
 def get_mermaid() -> str:

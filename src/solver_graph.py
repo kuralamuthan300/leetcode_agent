@@ -21,13 +21,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from src.checkpoints import get_checkpointer
 from src.llm_router import generate
 from src.schemas import ProblemSpec
 from src.state import AgentState
 from src.tools.access_broker import create_job, scoped_read, scoped_write
+from src.tools.audit import append_audit, log_decision, log_run, log_scan
 from src.tools.reporter import build_report
 from src.tools.safe_executor import safe_execute
 from src.tools.static_scanner import scan
@@ -178,6 +179,11 @@ def initial_solution(state: SolverState) -> dict:
 def static_scan(state: SolverState) -> dict:
     """Deterministic guard: AST scan solution before it ever executes."""
     verdict = scan(state.get("solution_code") or "")
+    try:
+        log_scan(state.get("workdir"), stage="solver.static_scan",
+                 code=state.get("solution_code"), flags=verdict["flags"])
+    except Exception:
+        pass
     return {"safety_flags": verdict["flags"], "scan_safe": verdict["safe"]}
 
 
@@ -220,6 +226,11 @@ def run_tests_timed(state: SolverState, runs: int = TIMED_RUNS) -> dict:
         row["time_ms"] = mean_ms
         averaged.append(row)
         timings.append(mean_ms)
+    try:
+        log_run(state.get("workdir"), stage="solver.run_tests_timed",
+                code=code, results=averaged, timings=timings)
+    except Exception:
+        pass
     return {
         "test_results": averaged,
         "timings_ms": timings,
@@ -354,6 +365,11 @@ def propose_optimization(state: SolverState) -> dict:
 def scan_optimized(state: SolverState) -> dict:
     """Deterministic guard on the optimization candidate."""
     verdict = scan(state.get("optimized_code") or "")
+    try:
+        log_scan(state.get("workdir"), stage="solver.scan_optimized",
+                 code=state.get("optimized_code"), flags=verdict["flags"])
+    except Exception:
+        pass
     return {"opt_scan_safe": verdict["safe"], "safety_flags": verdict["flags"]}
 
 
@@ -391,6 +407,11 @@ def run_optimized(state: SolverState, runs: int = TIMED_RUNS) -> dict:
         row["time_ms"] = mean_ms
         averaged.append(row)
         timings.append(mean_ms)
+    try:
+        log_run(state.get("workdir"), stage="solver.run_optimized",
+                code=code, results=averaged, timings=timings)
+    except Exception:
+        pass
     return {"optimized_results": averaged, "optimized_timings": timings, "errors": errors}
 
 
@@ -399,6 +420,8 @@ def accept_or_rollback(state: SolverState) -> dict:
 
     Sticky-accepted: if a previous round already accepted, a later
     rollback keeps opt_status=accepted and the current (best) solution.
+    Step 10: human approval enforced upstream in request_opt_approval;
+    every decision is appended to audit.jsonl.
     """
     errors = _errors(state)
     baseline_timings = state.get("baseline_timings") or []
@@ -408,6 +431,11 @@ def accept_or_rollback(state: SolverState) -> dict:
     def _rollback(reason: str, note_error: bool = False) -> dict:
         if note_error:
             errors.append(f"accept_or_rollback: {reason}")
+        try:
+            log_decision(state.get("workdir"), stage="solver.accept_or_rollback",
+                         decision="rolled-back", reason=reason)
+        except Exception:
+            pass
         if state.get("opt_status") == "accepted":
             return {"opt_status": "accepted", "errors": errors}
         return {
@@ -420,6 +448,9 @@ def accept_or_rollback(state: SolverState) -> dict:
 
     if not state.get("opt_scan_safe"):
         return _rollback(f"scan-blocked: {state.get('safety_flags') or []}")
+    if state.get("human_approved_opt") is False:
+        errors.append("accept_or_rollback: awaiting human approval — rolling back")
+        return _rollback("awaiting human approval")
     if not opt_results:
         return _rollback("executor error", note_error=True)
     if not all(r.get("passed") for r in opt_results):
@@ -430,6 +461,18 @@ def accept_or_rollback(state: SolverState) -> dict:
         return _rollback(
             f"not faster (before={before_total:.3f}ms after={after_total:.3f}ms)"
         )
+    try:
+        append_audit(state.get("workdir"), {
+            "stage": "solver.accept_or_rollback",
+            "decision": "accepted",
+            "reason": f"speedup {before_total:.3f}ms -> {after_total:.3f}ms",
+            "code_hash": __import__("hashlib").sha256(
+                (state.get("optimized_code") or "").encode()).hexdigest()[:16],
+            "timings_ms": list(opt_timings),
+            "approved": bool(state.get("human_approved_opt") is not False),
+        })
+    except Exception:
+        pass
     return {
         "solution_code": state.get("optimized_code"),
         "test_results": list(opt_results),
@@ -468,6 +511,14 @@ def write_report(state: SolverState) -> dict:
     except Exception as exc:
         errors.append(f"write_report: {exc}")
         return {"errors": errors}
+    try:
+        append_audit(str(workdir), {
+            "stage": "solver.write_report",
+            "decision": state.get("opt_status") or "rolled-back",
+            "timings_ms": list(state.get("timings_ms") or []),
+        })
+    except Exception:
+        pass
     return {"report_path": str(Path(workdir) / "report.md"), "errors": errors}
 
 
@@ -480,7 +531,36 @@ def save_solution(state: SolverState) -> dict:
     except Exception as exc:
         errors.append(f"save_solution: {exc}")
         return {"errors": errors}
+    try:
+        append_audit(str(state["workdir"]), {
+            "stage": "solver.save_solution",
+            "code_hash": __import__("hashlib").sha256(
+                (state.get("solution_code") or "").encode()).hexdigest()[:16],
+            "timings_ms": list(state.get("timings_ms") or []),
+        })
+    except Exception:
+        pass
     return {"errors": errors}
+
+
+def request_opt_approval(state: SolverState) -> dict:
+    """Step 10 human approval gate before accept_or_rollback.
+
+    Explicit human_approved_opt=False records pending approval; the
+    downstream accept_or_rollback then forces a rollback (no auto-accept)
+    while still writing report.md. None/True auto-passes for automated
+    runs (legacy compat); prod should use strict graph
+    (interrupt_before accept) or set False then resume with True.
+    """
+    errors = _errors(state)
+    if state.get("human_approved_opt") is False:
+        try:
+            log_decision(state.get("workdir"), stage="solver.opt_approval",
+                         decision="pending", reason="human_approved_opt is False")
+        except Exception:
+            pass
+        return {"pending_approval": "optimize", "errors": errors}
+    return {"pending_approval": None, "errors": errors}
 
 
 def flag_human(state: SolverState) -> dict:
@@ -518,7 +598,7 @@ def route_after_tests(state: SolverState) -> str:
 def route_after_opt_scan(state: SolverState) -> str:
     if state.get("opt_scan_safe"):
         return "run_optimized"
-    return "accept_or_rollback"
+    return "request_opt_approval"
 
 
 def route_after_accept(state: SolverState) -> str:
@@ -531,7 +611,13 @@ def route_after_accept(state: SolverState) -> str:
     return "write_report"
 
 
-def build_solver_graph() -> object:
+def build_solver_graph(checkpointer=None, with_interrupt: bool = False) -> object:
+    """Step 10: SqliteSaver persistence + optional human interrupt.
+
+    with_interrupt=True pauses before accept_or_rollback for manual review.
+    Default False keeps automated runs non-blocking (explicit
+    human_approved_opt=False still forces rollback in accept_or_rollback).
+    """
     builder = StateGraph(SolverState)
     builder.add_node("load_validate", load_validate)
     builder.add_node("initial_solution", initial_solution)
@@ -543,6 +629,7 @@ def build_solver_graph() -> object:
     builder.add_node("propose_optimization", propose_optimization)
     builder.add_node("scan_optimized", scan_optimized)
     builder.add_node("run_optimized", run_optimized)
+    builder.add_node("request_opt_approval", request_opt_approval)
     builder.add_node("accept_or_rollback", accept_or_rollback)
     builder.add_node("write_report", write_report)
     builder.add_node("save_solution", save_solution)
@@ -567,8 +654,9 @@ def build_solver_graph() -> object:
     builder.add_conditional_edges(
         "scan_optimized", route_after_opt_scan,
         {"run_optimized": "run_optimized",
-         "accept_or_rollback": "accept_or_rollback"})
-    builder.add_edge("run_optimized", "accept_or_rollback")
+         "request_opt_approval": "request_opt_approval"})
+    builder.add_edge("run_optimized", "request_opt_approval")
+    builder.add_edge("request_opt_approval", "accept_or_rollback")
     builder.add_conditional_edges(
         "accept_or_rollback", route_after_accept,
         {"snapshot_baseline": "snapshot_baseline",
@@ -576,7 +664,15 @@ def build_solver_graph() -> object:
     builder.add_edge("write_report", "save_solution")
     builder.add_edge("save_solution", END)
     builder.add_edge("flag_human", END)
-    return builder.compile(checkpointer=MemorySaver())
+    saver = checkpointer or get_checkpointer()
+    if with_interrupt:
+        return builder.compile(checkpointer=saver, interrupt_before=["accept_or_rollback"])
+    return builder.compile(checkpointer=saver)
 
 
 solver_app = build_solver_graph()
+
+
+def build_solver_graph_strict() -> object:
+    """Prod graph pausing before accept_or_rollback for human approval."""
+    return build_solver_graph(with_interrupt=True)

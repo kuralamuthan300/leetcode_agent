@@ -1,9 +1,9 @@
 # SESSION_STATE — resume here, do NOT re-scan repo
 
-current_step: 10
-last_verify: pass Step10 — full `uv run pytest -q`: 75 passed, 1 skipped (pre-existing docker-image skip). Security 8/8 blocked, E2E strings creator->solver->optimizer (rolled-back, report.md + audit.jsonl), SqliteSaver + approval gates verified.
-files_touched: src/state.py, src/checkpoints.py, src/graph.py, src/creator_graph.py, src/solver_graph.py, src/tools/audit.py, tests/test_security.py, tests/test_e2e_step10.py, docs/security_tests.md, docs/reports/e2e_step10.log, README.md, pyproject.toml
-next_step: done — all Steps 0-10 complete
+current_step: 11
+last_verify: docs-only update — added Steps 11-13 (Streamlit UI shell, HITL understanding + approve/decline, UI E2E) to BUILD_PLAN_STEP_BY_STEP.md; Sec 12 (UI) + Sec 13 (HITL) to LEETCODE_AGENT_PLAN.md; README UI run section; AGENTS.md 0-13. No code touched, no pytest run.
+files_touched: docs/build/BUILD_PLAN_STEP_BY_STEP.md, docs/architecture/LEETCODE_AGENT_PLAN.md, README.md, AGENTS.md
+next_step: implement Step 11 (Streamlit UI shell) via Build Mode
 
 ## Rule
 - Startup reads: AGENTS.md + this file + current Step section only.

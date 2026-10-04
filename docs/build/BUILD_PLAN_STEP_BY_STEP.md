@@ -15,12 +15,13 @@ Models:
 - Light: `deepseek-r1:1.5b` (via Ollama) — extraction, formatting, routing.
 - If Ollama tag is invalid, Build Mode should stop and tell you. Check with `ollama list`.
 
-Final structure being built toward (from `LEETCODE_AGENT_PLAN.md`):
+Final structure being built toward (from `LEETCODE_AGENT_PLAN.md` Sec 4 + Sec 12):
 ```
 config/models.yaml, sandbox.yaml
 src/state.py, schemas.py, llm_router.py
 src/tools/access_broker.py, static_scanner.py, safe_executor.py, reporter.py
 src/graph.py, creator_graph.py, solver_graph.py
+ui/app.py, ui/agent_client.py
 workspace/jobs/<job_id>/, workspace/problems/
 Dockerfile.sandbox, tests/
 ```
@@ -151,6 +152,38 @@ No other LangGraph concepts needed for this project.
 
 **Verify:** `uv run pytest` full suite green, E2E log saved, security doc lists 8/8 blocked.
 **Done when:** Definition of Done from LEETCODE_AGENT_PLAN.md Sec 10 met.
+
+---
+
+## Step 11 — Streamlit UI Shell (Modes + Status/Stage + Problem/Solution/Tests)
+
+**Goal:** Simple web UI (Option A: Streamlit) to interact with the agent. No graph logic changes.
+**LangGraph concept:** `app.stream(..., stream_mode="updates")` — UI subscribes to node names for live stage display. `SqliteSaver` `thread_id=job_id` for resume.
+**Ask Build Mode:**
+> Implement Step 11 only: create `ui/app.py` (Streamlit) + `ui/agent_client.py` (thin wrapper: `run_creator(requirements_dict, thread_id)`, `run_solver(problem_dict, thread_id)`, `get_state(thread_id)`, no LLM logic in UI). Sidebar: mode radio (`creator | solver | auto | review`), `category` dropdown, `difficulty` radio, `num_tests` number input (default 8, feeds `RequirementsSpec.num_tests`), file upload / textarea / example picker (`two_sum_demo`). Main: (1) status banner pill derived from `AgentState` (`idle|running|awaiting approval|done|needs_human` + `job_id, mode, attempt, opt_round`), (2) stage stepper from streamed node names — creator: `intake_validate -> draft_problem -> generate_tests -> format_dedup -> oracle_solution -> static_scan -> run_tests -> request_promote_approval -> promote_save`; solver: `load_validate -> initial_solution -> static_scan -> run_tests_timed -> snapshot_baseline -> analyze_complexity -> propose_optimization -> scan_optimized -> run_optimized -> request_opt_approval -> accept_or_rollback -> write_report -> save_solution` (use `st.status` + `st.progress` + ✅/🔵/⚪ columns + repair badge `attempt N/4`), (3) three tabs: `Problem` (`title, statement, signature, constraints, examples`), `Solution` (`st.code(solution_code, python)` + copy), `Tests` (table `test_id|input|expected|actual|pass|mean_ms` from `test_results`/`timings_ms`, toggle hidden, `show hidden`). Add `streamlit>=1.32` dep via `pyproject.toml` + `uv lock`. Add `tests/test_ui_smoke.py` (client wrapper mocked graph: status mapping, stepper order, tabs render data without Ollama/Docker).
+
+**Verify:** `uv run pytest tests/test_ui_smoke.py -v` green; manual `uv run streamlit run ui/app.py` shows modes, stepper advances on mocked stream, tabs show problem/solution/tests.
+**Done when:** User can set `num_tests`, pick creator/solver, see live status + stage + problem statement + python solution + testcases that ran.
+
+## Step 12 — HITL Understanding Gate + Clarify + Final Approve/Decline
+
+**Goal:** HITL-1 after requirements (verify understanding + agent asks doubts) and HITL-2 at end (approve/decline problem/solution). Reuses Step 10 `SqliteSaver` + `interrupt_before` pattern.
+**LangGraph concept:** New blocking nodes + `pending_approval` values (`understanding`, `clarify`, `promote`, `optimize`). Pause via checkpointer, resume via `update_state(thread_id, {human_answer})`.
+**Ask Build Mode:**
+> Implement Step 12 only: extend `src/state.py` with `understanding_summary: str|None, human_question: str|None, human_answer: str|None` (keep all Step 10 fields). In `src/creator_graph.py`: add nodes `summarize_understanding(light: renders category/difficulty/num_tests/constraints/signature expectation from requirements)` + `request_understanding_approval (sets pending_approval="understanding", needs_human=True when awaiting confirm)` wired as `intake_validate -> summarize_understanding -> request_understanding_approval -> draft_problem...`; on resume inject `human_answer` into `draft_problem` prompt context. Mirror in `src/solver_graph.py`: `summarize_problem(light)` + `request_understanding_approval` after `load_validate`. HITL-2: keep `request_promote_approval` / `request_opt_approval` but add decline path — `human_approved_*=False + human_answer=reason` routes to `repair_solution` (budget left) else `flag_human`, and logs `declined` to `audit.jsonl` (do not silently drop). Update `ui/agent_client.py` + `ui/app.py`: understanding card (summary + agent questions + editable `num_tests`/fields + `[Confirm & Continue]` / `[Answer + Continue]`), mid-run clarify popup (spec invalid or repair stuck attempt>=2: show failing tests + question + text input + `[Submit + Resume]` / `[Skip/auto-retry]`), final approval view (problem + solution + pass rate + total ms + `[Approve]` / `[Decline + reason]`). Add `tests/test_hitl_understanding.py` (mocked generate: intake pauses with `pending_approval="understanding"`, resume with answer continues to draft; decline at end routes to repair/flag + audit entry; no Docker/Ollama).
+
+**Verify:** `uv run pytest tests/test_hitl_understanding.py -v` green; manual Streamlit: submit requirements -> understanding card blocks drafting -> confirm resumes; final approve promotes / decline logs reason.
+**Done when:** No heavy LLM/Docker runs before HITL-1 confirm; every HITL-2 decision (accept/decline) is in `audit.jsonl`; safety order unchanged (scan before execute).
+
+## Step 13 — UI E2E + Docs Polish
+
+**Goal:** Prove UI + HITL chain works end-to-end on mocks; update user docs.
+**LangGraph concept:** Checkpoint resume across two pauses in one `thread_id` (understanding -> final approval).
+**Ask Build Mode:**
+> Implement Step 13 only: add `tests/test_ui_e2e_step13.py` (mocked `generate` + mocked `safe_execute`: full Streamlit client flow `requirements(num_tests=5) -> understanding confirm -> streamed stages -> 5-row test table -> final approve`, plus decline-path test; assert `audit.jsonl` has `understanding_confirmed` + `promoted/accepted` entries). Update `README.md` with `uv run streamlit run ui/app.py` usage (modes, num_tests, HITL-1/HITL-2 buttons), update `docs/reports/SESSION_STATE.md` checkpoint. No architecture changes.
+
+**Verify:** `uv run pytest -q` full suite green (Steps 0-12 still pass + new UI/HITL tests).
+**Done when:** Mocked E2E passes, README documents UI + HITL buttons, SESSION_STATE points to done.
 
 ---
 

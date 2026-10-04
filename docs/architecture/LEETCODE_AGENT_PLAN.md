@@ -273,5 +273,33 @@ What this blocks: `os.remove()`, `shutil.rmtree('/')`, `open('../../etc/passwd')
 - Timing noise on Mac/ laptop -> average of 3, pin CPU in Docker, report mean+max.
 - LLM overfits to hidden tests -> hide `expected` for hidden tests during solve, only reveal pass/fail until final report.
 
+## 12. Web UI Design (Streamlit, Option A)
+
+Simple local UI in `ui/app.py` + thin `ui/agent_client.py` (no LLM logic in UI; all calls go through `creator_app` / `solver_app` with `thread_id=job_id` on `SqliteSaver`).
+
+Modes (sidebar radio): `creator` (requirements -> problem JSON), `solver` (problem JSON -> solution + timings + report), `auto` (router decides via `route_after_router`: `problem_spec` present -> solver else creator), `review` (read-only: pick `job_id` from `workspace/jobs/`, view state + `audit.jsonl` + `report.md`, resume paused run).
+
+Inputs: `category` dropdown, `difficulty` radio, `num_tests` number input (default 8 -> `RequirementsSpec.num_tests` -> `generate_tests` count), `constraints_hint` text, textarea / file upload / example picker.
+
+Live status + stage: status banner from `AgentState` (`idle|running|awaiting approval|done|needs_human`, plus `job_id, mode, attempt, opt_round, workdir`); stage stepper from `app.stream(stream_mode="updates")` node names via `st.status` + `st.progress` + ✅/🔵/⚪ columns (creator 9 nodes, solver 13 nodes — see BUILD_PLAN Step 11); detail expander per stage (`test_results`, `timings_ms`, `safety_flags`, last 3 `errors`).
+
+Results tabs: `Problem` (`title, statement, signature, constraints, examples`), `Solution` (`solution_code` python block, baseline vs optimized diff), `Tests` (`test_id|input|expected|actual|pass|mean_ms`, hidden toggle, count == `num_tests`).
+
+Run: `uv run streamlit run ui/app.py` (local-only; Ollama + Docker unchanged). Dep: `streamlit>=1.32`.
+
+## 13. HITL Design (Understanding + Final Approval)
+
+Extends Step 10 approve-only gates (`human_approved_promote/opt`) with ask-and-answer.
+
+State additions (`src/state.py`): `understanding_summary: str|None, human_question: str|None, human_answer: str|None`. `pending_approval` values: `understanding | clarify | promote | optimize`.
+
+HITL-1 (after requirements, blocking): `intake_validate -> summarize_understanding(light) -> request_understanding_approval -> draft_problem`. Light renders interpreted requirements (category/difficulty/num_tests/constraints/signature expectation) + questions. Graph pauses (`needs_human=True`); UI shows understanding card with editable fields; `[Confirm & Continue]` / `[Answer + Continue]` resumes via `update_state(thread_id, {human_answer})`, answer injected into `draft_problem` / `initial_solution` prompt. Solver mirrors with `summarize_problem` after `load_validate`. No heavy LLM / Docker runs before confirm.
+
+Mid-run clarify (opportunistic): fires when `format_dedup` invalid or `repair_solution` `attempt>=2` instead of straight `flag_human` — asks about bad spec ids / suspicious expected values; `[Submit + Resume]` / `[Skip/auto-retry]`.
+
+HITL-2 (at end): reuse `request_promote_approval` / `request_opt_approval`; UI shows final problem + solution + pass rate + total ms; `[Approve]` promotes/accepts, `[Decline + reason]` routes to `repair_solution` (if budget left) else `flag_human` and logs `declined` + reason to `audit.jsonl`.
+
+Safety invariant: clarification never bypasses `static_scan` -> `safe_execute` order; every HITL decision appended to `audit.jsonl`.
+
 ---
 Generated for `leetcodeagent` — single-job workspace isolation + Docker sandbox + dual Ollama routing.

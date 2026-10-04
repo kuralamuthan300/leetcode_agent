@@ -48,3 +48,16 @@ scan/run/decision appended to `<jobdir>/audit.jsonl`. Prod pauses:
 `build_creator_graph_strict()` / `build_solver_graph_strict()` /
 `build_graph_strict()` compile with `interrupt_before`.
 Security table: `docs/security_tests.md`.
+
+## Web UI (Step 11+, planned)
+
+```bash
+uv run streamlit run ui/app.py
+```
+
+- Modes: `creator | solver | auto | review` (sidebar).
+- Inputs: category, difficulty, `num_tests` (default 8), constraints hint.
+- Live status (`idle|running|awaiting approval|done|needs_human`) + stage stepper + tabs `Problem | Solution | Tests`.
+- HITL-1: after requirements, understanding card (`Confirm & Continue` / `Answer + Continue`) — no drafting before confirm.
+- HITL-2: at end, approve problem/solution or decline with reason (logged to `audit.jsonl`).
+- See `docs/architecture/LEETCODE_AGENT_PLAN.md` Sec 12 (UI) + Sec 13 (HITL), build steps 11–13 in `docs/build/BUILD_PLAN_STEP_BY_STEP.md`.

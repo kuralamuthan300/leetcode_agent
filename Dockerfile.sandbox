@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+# No network tools installed; base slim image has none.
+# Create unprivileged user and work dir only.
+RUN useradd --create-home --shell /bin/false runner \
+    && mkdir -p /work \
+    && chown runner:runner /work
+
+USER runner
+WORKDIR /work
+
+# Harness is mounted per-job at /work/_harness.py (copied by safe_executor).
+# Default cmd is a no-op; safe_executor overrides with explicit invocation.
+CMD ["python3", "/work/_harness.py", "/work/problem.json", "/work/solution.py"]

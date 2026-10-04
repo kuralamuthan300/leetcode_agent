@@ -36,6 +36,65 @@ function taskKey(slug: string): string {
   return `task:${slug}`
 }
 
+export type ChangedFile = { status: string; path: string }
+
+export function parseNameStatus(output: string): ChangedFile[] {
+  return output
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => l !== "(no files)")
+    .map((line) => {
+      const parts = line.split("\t")
+      const code = parts[0] ?? ""
+      const status = code.replace(/[0-9]/g, "") || code
+      const filePath = (parts[parts.length - 1] ?? "").replace(/^"|"$/g, "")
+      return { status, path: filePath }
+    })
+}
+
+function vscodeLink(absPath: string): string {
+  return `vscode://file${encodeURI(absPath)}:1`
+}
+
+export function buildVisualSection(
+  files: ChangedFile[],
+  worktreeDir: string | undefined,
+  base: string,
+  branch: string
+): string {
+  const lines = ["", "Visual review (Cmd/Ctrl+click a link):"]
+  if (worktreeDir) {
+    lines.push(`- worktree folder: ${worktreeDir}`)
+    for (const f of files) {
+      if (f.status === "D") {
+        lines.push(`- [D] ${f.path} (deleted in ${branch})`)
+        continue
+      }
+      const abs = path.join(worktreeDir, f.path)
+      lines.push(`- [${f.status}] ${f.path}\n  open: ${abs}\n  vscode: ${vscodeLink(abs)}`)
+    }
+    lines.push(
+      `- side-by-side: open a second window on the worktree (\`code "${worktreeDir}"\`), or run \`git difftool --dir-diff ${base}...${branch}\``
+    )
+  } else {
+    lines.push(`- no live worktree found for ${branch}; per-file links unavailable.`)
+    lines.push(`- run \`git difftool --dir-diff ${base}...${branch}\` for a visual diff.`)
+  }
+  return lines.join("\n")
+}
+
+function findWorktreeDir(root: string, branch: string): string | undefined {
+  const out = gitOk(root, ["worktree", "list", "--porcelain"])
+  if (!out) return undefined
+  for (const block of out.split("\n\n")) {
+    const wt = block.match(/^worktree (.+)$/m)?.[1]
+    const br = block.match(/^branch (.+)$/m)?.[1]
+    if (wt && br === `refs/heads/${branch}`) return wt
+  }
+  return undefined
+}
+
 function branchFor(slug: string): string {
   return `${BRANCH_PREFIX}${slug}`
 }
@@ -101,13 +160,15 @@ export default Plugin.define({
       }
       const mergeBase = gitOk(root, ["merge-base", base, branch]) ?? base
       const stat = gitOk(root, ["diff", `${base}...${branch}`, "--stat"]) || "(empty diff)"
-      const names = gitOk(root, ["diff", `${base}...${branch}`, "--name-status"]) || "(no files)"
+      const namesRaw = gitOk(root, ["diff", `${base}...${branch}`, "--name-status"]) || "(no files)"
       const commits = gitOk(root, ["log", "--oneline", `${base}..${branch}`]) || "(no commits — uncommitted work in worktree?)"
       const worktreeStatus = stored ? gitOk(stored.directory, ["status", "--porcelain"]) ?? "" : ""
       const dirtyNote = worktreeStatus.trim()
         ? `\n\nWARNING: uncommitted changes in worktree ${stored?.directory}:\n${worktreeStatus}\nCommit them first — branch diff misses uncommitted work.`
         : ""
-      return `diff ${base}...${branch} (merge-base ${mergeBase.slice(0, 8)})\n\nCommits (${base}..${branch}):\n${commits}\n\nStat:\n${stat}\n\nFiles:\n${names}${dirtyNote}`
+      const wtDir = stored?.directory ?? findWorktreeDir(root, branch)
+      const visual = buildVisualSection(parseNameStatus(namesRaw), wtDir, base, branch)
+      return `diff ${base}...${branch} (merge-base ${mergeBase.slice(0, 8)})\n\nCommits (${base}..${branch}):\n${commits}\n\nStat:\n${stat}\n\nFiles:\n${namesRaw}${dirtyNote}${visual}`
     }
 
     async function doMerge(slug: string, squash: boolean): Promise<string> {

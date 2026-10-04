@@ -187,6 +187,26 @@ No other LangGraph concepts needed for this project.
 
 ---
 
+## Build Log (as-built, 2026-10-04 — all Steps 0–13 complete)
+
+Final: `uv run pytest -q` → **91 passed, 1 skipped**. UI/HITL evidence in
+`docs/reports/steps_11_13_verification.md`.
+
+- Step 11: `ui/agent_client.py` (thin wrapper, frozen `CREATOR_STAGES` 9 /
+  `SOLVER_STAGES` 13 for the stepper) + `ui/app.py` + `streamlit>=1.32` dep
+  + `tests/test_ui_smoke.py` (4 passed, mocked graph).
+- Step 12: HITL gates in both graphs (`summarize_*` deterministic, **not**
+  light-LLM; pauses flag-gated via `require_understanding` / `allow_clarify`,
+  default off for headless compat); decline → repair-or-human + `declined`
+  audit entries; `human_answer` injected into draft/solve/repair prompts;
+  intake/load reuse branches reset stale gate flags for `update_state` resume.
+  `tests/test_hitl_understanding.py` (9 passed, mocked).
+- Step 13: `tests/test_ui_e2e_step13.py` (3 passed, mocked client flows with
+  `understanding_confirmed` + `promoted/accepted` audit asserts); README UI
+  section finalized; `SESSION_STATE.md` → done.
+
+---
+
 ## How to Drive Build Mode (copy-paste)
 
 1. `Implement Step 0 from BUILD_PLAN_STEP_BY_STEP.md, nothing else. Stop after pytest passes.`

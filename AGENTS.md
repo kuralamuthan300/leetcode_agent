@@ -3,7 +3,7 @@
 ## Sources of truth
 - `docs/architecture/LEETCODE_AGENT_PLAN.md` — architecture, JSON schemas, sandbox design (Sec 12 UI, Sec 13 HITL).
 - `docs/build/BUILD_PLAN_STEP_BY_STEP.md` — build order. Implement exactly one Step per session (0–13), nothing else.
-- `docs/reports/` — optimizer before/after tables, E2E logs. `docs/security_tests.md` (Step 10).
+- `docs/reports/` — E2E logs (`e2e_step10.log`), UI/HITL verification (`steps_11_13_verification.md`). `docs/security_tests.md` (Step 10).
 - `docs/reports/SESSION_STATE.md` — resume checkpoint. Read this second, after this file.
 
 ## Startup (anti-reread, read ONLY these in order)
@@ -28,7 +28,7 @@
 - Docker run: `--network none --memory 256m --cpus 1 --pids-limit 64 --read-only`, mount only job dir to `/work`, `timeout` kill. Sanitize tracebacks (no host paths).
 
 ## Commands
-- Setup: `uv sync` (deps from `pyproject.toml`, locked in `uv.lock`: langgraph, langchain-ollama, pydantic, pyyaml, docker; dev: pytest)
+- Setup: `uv sync` (deps from `pyproject.toml`, locked in `uv.lock`: langgraph, langchain-ollama, pydantic, pyyaml, docker, streamlit; dev: pytest)
 - Health: `ollama list` + `uv run python -m src.llm_router --healthcheck`
 - Sandbox: `docker build -f Dockerfile.sandbox -t sandbox-img .`
 - Tests: `uv run pytest -q` (full), `uv run pytest tests/test_<name>.py -v` (single)

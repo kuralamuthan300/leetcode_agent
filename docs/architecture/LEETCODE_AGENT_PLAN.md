@@ -141,6 +141,31 @@ State (`AgentState` TypedDict):
 
 Checkpointer: `MemorySaver` (dev) / `SqliteSaver` (prod) for resume + audit.
 
+> **As built (Steps 6–13, 2026-10-04):** the mermaid sketches above are the
+> original design. Actual node lists in code:
+> - Top level (`src/graph.py`): `router -> creator | solver -> END`.
+> - Creator (`src/creator_graph.py`, 14 nodes): `intake_validate ->
+>   summarize_understanding -> request_understanding_approval ->
+>   draft_problem -> generate_tests -> format_dedup -> oracle_solution ->
+>   static_scan -> run_tests -> request_promote_approval -> promote_save`,
+>   plus `repair_solution` (loops to `oracle_solution`) and `request_clarify`
+>   / `flag_human` (terminal). Declined promotion re-enters `repair_solution`
+>   while budget remains.
+> - Solver (`src/solver_graph.py`, 18 nodes): `load_validate ->
+>   summarize_problem -> request_understanding_approval -> initial_solution ->
+>   static_scan -> run_tests_timed -> repair_solution ->
+>   snapshot_baseline -> analyze_complexity -> propose_optimization ->
+>   scan_optimized -> run_optimized -> request_opt_approval ->
+>   accept_or_rollback -> write_report -> save_solution`, plus
+>   `request_clarify` / `flag_human`. Declined optimization re-enters
+>   `repair_solution` while budget remains.
+> - Actual `AgentState` (`src/state.py`) additionally carries:
+>   `workdir, requirements/problem_path, human_approved_promote/opt,
+>   pending_approval (understanding|clarify|promote|optimize),
+>   understanding_summary, human_question, human_answer,
+>   require_understanding, allow_clarify, understanding_confirmed,
+>   clarify_asked, audit_path` (+ graph-local scan/opt fields).
+
 ### 6.2 Creator Sub-Graph (Problem Authoring)
 
 ```mermaid
@@ -266,6 +291,12 @@ What this blocks: `os.remove()`, `shutil.rmtree('/')`, `open('../../etc/passwd')
 - Isolation: agent file tool cannot access outside `jobs/<job_id>/` (pytest proves).
 - Optimizer: demonstrates measurable speedup on at least one medium problem (e.g. O(n^2)->O(n)) without breaking tests.
 
+> **Verified 2026-10-04:** full suite `91 passed, 1 skipped`
+> (`uv run pytest -q`); security 8/8 blocked (`docs/security_tests.md`);
+> E2E logs in `docs/reports/`; UI/HITL flows covered by
+> `tests/test_ui_smoke.py`, `tests/test_hitl_understanding.py`,
+> `tests/test_ui_e2e_step13.py` (all mocked, no Ollama/Docker).
+
 ## 11. Risks & Mitigations
 
 - Ollama tag mismatch (`gemma4:31b-cloud`) -> centralize in `models.yaml`, startup check with clear error.
@@ -277,7 +308,7 @@ What this blocks: `os.remove()`, `shutil.rmtree('/')`, `open('../../etc/passwd')
 
 Simple local UI in `ui/app.py` + thin `ui/agent_client.py` (no LLM logic in UI; all calls go through `creator_app` / `solver_app` with `thread_id=job_id` on `SqliteSaver`).
 
-Modes (sidebar radio): `creator` (requirements -> problem JSON), `solver` (problem JSON -> solution + timings + report), `auto` (router decides via `route_after_router`: `problem_spec` present -> solver else creator), `review` (read-only: pick `job_id` from `workspace/jobs/`, view state + `audit.jsonl` + `report.md`, resume paused run).
+Modes (sidebar radio): `creator` (requirements -> problem JSON), `solver` (problem JSON -> solution + timings + report), `auto` (currently runs the creator flow; router-based dispatch is future work), `review` (read-only: pick `job_id` from `workspace/jobs/`, view state + `audit.jsonl` + `report.md`, resume paused run).
 
 Inputs: `category` dropdown, `difficulty` radio, `num_tests` number input (default 8 -> `RequirementsSpec.num_tests` -> `generate_tests` count), `constraints_hint` text, textarea / file upload / example picker.
 
@@ -300,6 +331,22 @@ Mid-run clarify (opportunistic): fires when `format_dedup` invalid or `repair_so
 HITL-2 (at end): reuse `request_promote_approval` / `request_opt_approval`; UI shows final problem + solution + pass rate + total ms; `[Approve]` promotes/accepts, `[Decline + reason]` routes to `repair_solution` (if budget left) else `flag_human` and logs `declined` + reason to `audit.jsonl`.
 
 Safety invariant: clarification never bypasses `static_scan` -> `safe_execute` order; every HITL decision appended to `audit.jsonl`.
+
+> **As built (Step 12) deviations from the sketch above:**
+> - `summarize_understanding` / `summarize_problem` are **deterministic
+>   template renders, not light-LLM calls** — the gate must never depend on
+>   model availability, and legacy hermetic mocks only stub heavy tasks.
+> - Pauses are **flag-gated, not interrupt-gated**: `require_understanding=True`
+>   enforces HITL-1, `allow_clarify=True` enables the mid-run clarify detour;
+>   both default off so headless runs stay non-blocking (same convention as
+>   the Step 10 `human_approved_*` gates). A pause ends the run at
+>   `flag_human` with `pending_approval` set; resume is `update_state` with
+>   `human_answer`/approval flags + re-invoke (intake/load reuse the jail
+>   from checkpoint and clear stale `needs_human`/`pending_approval`).
+>   Step 10 `interrupt_before` strict builders are retained unchanged.
+> - `human_answer` is injected into `draft_problem` / `initial_solution` /
+>   both `repair_solution` prompts; a decline consumes its approval flag in
+>   repair so the retried artifact gets a clean approval pass.
 
 ---
 Generated for `leetcodeagent` — single-job workspace isolation + Docker sandbox + dual Ollama routing.

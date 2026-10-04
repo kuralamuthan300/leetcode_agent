@@ -51,6 +51,21 @@ def _load_sandbox_config() -> dict:
     return cfg
 
 
+_DAEMON_MARKERS = (
+    "cannot connect to the docker",
+    "is the docker daemon running",
+    "docker.sock",
+    "connection refused",
+    "context deadline exceeded",
+)
+
+
+def _daemon_unreachable(stderr: str) -> bool:
+    """True when docker failed only because the daemon is down (not a job error)."""
+    s = (stderr or "").lower()
+    return any(m in s for m in _DAEMON_MARKERS)
+
+
 def _sanitize(text: str | None, workdir: Path) -> str | None:
     if not text:
         return text
@@ -174,10 +189,13 @@ def safe_execute(
         except FileNotFoundError:
             proc = None  # fall through to local
         else:
-            if proc.returncode != 0 and not proc.stdout.strip():
-                err = _sanitize(proc.stderr, resolved) or f"docker exit {proc.returncode}"
+            if proc.returncode == 0 or proc.stdout.strip():
+                return _parse_harness_lines(proc.stdout, prob.testcases, resolved)
+            err = _sanitize(proc.stderr, resolved) or f"docker exit {proc.returncode}"
+            if _daemon_unreachable(proc.stderr or ""):
+                pass  # daemon down (env issue, not job fault) -> local fallback below
+            else:
                 return _timeout_results(prob.testcases, 0.0, f"docker-error: {err}")
-            return _parse_harness_lines(proc.stdout, prob.testcases, resolved)
         if proc is None:
             pass  # docker binary vanished; use local fallback below
 

@@ -176,14 +176,60 @@ def _resume_hitl(values: dict) -> None:
 def main() -> None:
     st.title("LeetCode Agent")
     with st.sidebar:
-        mode = st.radio("mode", ["creator", "solver", "auto", "review"], index=0)
-        category = st.selectbox("category", CATEGORIES, index=0)
-        difficulty = st.radio("difficulty", ["easy", "medium", "hard"], index=0)
-        num_tests = st.number_input("num_tests", min_value=1, max_value=50, value=8, step=1)
-        constraints_hint = st.text_input("constraints_hint", value="")
-        uploaded = st.file_uploader("upload json", type=["json"])
-        example_choice = st.selectbox("example picker", ["none", "two_sum_demo"], index=0)
-        pasted = st.text_area("or paste json here", height=120)
+        with st.expander("What should I provide?", expanded=False):
+            st.markdown(
+                "- **creator**: pick `category` + `difficulty` + `num_tests`, "
+                "optionally a `constraints_hint` (e.g. `n <= 10^5`). "
+                "No file needed — the agent drafts a new problem.\n"
+                "- **solver**: give a `problem_id_*.json` via upload, paste, "
+                "or the `two_sum_demo` example. Sidebar category/difficulty "
+                "are ignored.\n"
+                "- **auto**: same as creator (router dispatch is future work).\n"
+                "- **review**: read-only — enter the `job_id` of a past run "
+                "to inspect its state, `audit.jsonl`, and `report.md`."
+            )
+        mode = st.radio(
+            "mode",
+            ["creator", "solver", "auto", "review"], index=0,
+            help="creator: requirements -> new problem JSON. "
+                 "solver: problem JSON -> solution + timings + report. "
+                 "auto: currently same as creator. "
+                 "review: read-only inspection of a past job_id.")
+        category = st.selectbox(
+            "category", CATEGORIES, index=0,
+            help="Problem family to invent (e.g. arrays, dp, graphs). "
+                 "Used only in creator/auto mode.")
+        difficulty = st.radio(
+            "difficulty", ["easy", "medium", "hard"], index=0,
+            help="Target difficulty, enforced on the generated problem. "
+                 "Used only in creator/auto mode.")
+        num_tests = st.number_input(
+            "num_tests", min_value=1, max_value=50, value=8, step=1,
+            help="How many testcases to generate (default 8). "
+                 "Stored as RequirementsSpec.num_tests. You can still "
+                 "change it on the HITL-1 understanding card.")
+        st.caption("Tip: 8 is a good default; use 4–5 for a quick trial run.")
+        constraints_hint = st.text_input(
+            "constraints_hint", value="",
+            help="Free text like `n <= 10^5` or `must use O(1) space`. "
+                 "Shapes perf-test sizes. Optional — the agent asks on the "
+                 "understanding card if it is missing.")
+        uploaded = st.file_uploader(
+            "upload json", type=["json"],
+            help="Creator: a requirements JSON "
+                 "({job_id, category, difficulty, language, num_tests, "
+                 "constraints_hint, extra}). Solver: a problem_id_*.json. "
+                 "Leave empty to use the sidebar fields / example instead.")
+        st.caption("Solver expects a problem file; creator works without one.")
+        example_choice = st.selectbox(
+            "example picker", ["none", "two_sum_demo"], index=0,
+            help="Load the bundled Two Sum problem instead of uploading. "
+                 "Handy for trying solver mode instantly.")
+        pasted = st.text_area(
+            "or paste json here", height=120,
+            help="Paste a requirements JSON (creator) or problem JSON "
+                 "(solver). Takes precedence over the example picker when "
+                 "non-empty.")
 
     state: dict = st.session_state.get("agent_state", {})
     completed: list[str] = st.session_state.get("completed_stages", [])

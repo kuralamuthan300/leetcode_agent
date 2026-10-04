@@ -41,11 +41,19 @@ SOLVER_STAGES: list[str] = [
 ]
 
 
-def stages_for_mode(mode: str) -> list[str]:
+def stages_for_mode(mode: str, include_hitl: bool = False) -> list[str]:
     if mode == "creator":
-        return list(CREATOR_STAGES)
+        base = list(CREATOR_STAGES)
+        if include_hitl:
+            base[1:1] = ["summarize_understanding",
+                         "request_understanding_approval"]
+        return base
     if mode == "solver":
-        return list(SOLVER_STAGES)
+        base = list(SOLVER_STAGES)
+        if include_hitl:
+            base[1:1] = ["summarize_problem",
+                         "request_understanding_approval"]
+        return base
     return list(CREATOR_STAGES)
 
 
@@ -104,6 +112,7 @@ def run_creator(
     requirements_dict: dict[str, Any] | str | Path,
     thread_id: str,
     app: Any | None = None,
+    require_understanding: bool = True,
 ) -> dict[str, Any]:
     """Invoke creator_app. requirements_dict may be a dict or a path."""
     if app is None:
@@ -113,7 +122,8 @@ def run_creator(
     else:
         req_path = str(requirements_dict)
     return app.invoke(
-        {"requirements_path": req_path},
+        {"requirements_path": req_path,
+         "require_understanding": require_understanding},
         config={"configurable": {"thread_id": thread_id}},
     )
 
@@ -122,6 +132,7 @@ def run_solver(
     problem_dict: dict[str, Any] | str | Path,
     thread_id: str,
     app: Any | None = None,
+    require_understanding: bool = True,
 ) -> dict[str, Any]:
     """Invoke solver_app. problem_dict may be a dict or a path."""
     if app is None:
@@ -131,7 +142,8 @@ def run_solver(
     else:
         prob_path = str(problem_dict)
     return app.invoke(
-        {"problem_path": prob_path},
+        {"problem_path": prob_path,
+         "require_understanding": require_understanding},
         config={"configurable": {"thread_id": thread_id}},
     )
 
@@ -217,3 +229,71 @@ def solution_tab_data(state: dict[str, Any]) -> str:
     """Extract python solution code for Solution tab."""
     code = state.get("solution_code")
     return code if isinstance(code, str) else ""
+
+
+# ---------------------------------------------------------------- Step 12 HITL
+
+def understanding_card_data(state: dict[str, Any]) -> dict[str, Any]:
+    """Data for the HITL-1 understanding card."""
+    req = state.get("requirements") or state.get("problem_spec") or {}
+    if not isinstance(req, dict):
+        req = {}
+    return {
+        "summary": state.get("understanding_summary") or "",
+        "question": state.get("human_question") or "",
+        "category": req.get("category", ""),
+        "difficulty": req.get("difficulty", ""),
+        "num_tests": req.get("num_tests", 8),
+        "waiting": state.get("pending_approval") == "understanding",
+    }
+
+
+def clarify_data(state: dict[str, Any]) -> dict[str, Any]:
+    """Data for the mid-run clarify popup."""
+    results = state.get("test_results") or []
+    failing = [r for r in results
+               if isinstance(r, dict) and not r.get("passed")]
+    return {
+        "question": state.get("human_question") or "",
+        "failing": failing[:5],
+        "attempt": int(state.get("attempt") or 0),
+        "waiting": state.get("pending_approval") == "clarify",
+    }
+
+
+def final_approval_data(state: dict[str, Any]) -> dict[str, Any]:
+    """Data for the HITL-2 final approval view."""
+    results = state.get("test_results") or []
+    timings = state.get("timings_ms") or []
+    passed = [r for r in results
+              if isinstance(r, dict) and r.get("passed")]
+    total_ms = 0.0
+    try:
+        total_ms = sum(float(t) for t in timings)
+    except (TypeError, ValueError):
+        total_ms = 0.0
+    return {
+        "problem": state.get("problem_spec") or {},
+        "solution": state.get("solution_code") or "",
+        "pass_rate": f"{len(passed)}/{len(results)}" if results else "0/0",
+        "total_ms": round(total_ms, 3),
+        "pending": state.get("pending_approval"),
+        "waiting": state.get("pending_approval") in ("promote", "optimize"),
+    }
+
+
+def update_and_resume(
+    app: Any,
+    thread_id: str,
+    values: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Resume a paused run: inject human values, then re-invoke.
+
+    Works for END-paused HITL gates (flag-gated default graphs): the
+    intake/load nodes reuse the existing jail from checkpoint state,
+    and the approval nodes consume human_answer / approval flags.
+    """
+    cfg = {"configurable": {"thread_id": thread_id}}
+    app.update_state(cfg, values)
+    return app.invoke(payload, config=cfg)

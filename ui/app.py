@@ -1,4 +1,4 @@
-"""Streamlit UI shell (Step 11). No LLM logic; delegates to ui.agent_client."""
+"""Streamlit UI shell (Steps 11-12). No LLM logic; delegates to ui.agent_client."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ import streamlit as st
 from ui.agent_client import (
     CREATOR_STAGES,
     SOLVER_STAGES,
+    clarify_data,
     completed_stages_from_stream,
+    final_approval_data,
     format_test_rows,
     get_state,
     problem_tab_data,
@@ -21,6 +23,8 @@ from ui.agent_client import (
     stages_for_mode,
     status_for_state,
     stream_run,
+    understanding_card_data,
+    update_and_resume,
 )
 
 EXAMPLE_PROBLEM = Path("workspace/problems/examples/problem_id_two_sum_demo.json")
@@ -64,6 +68,111 @@ def _stage_stepper(stages: list[str], completed: list[str], attempt: int = 0) ->
         st.warning(f"repair badge: attempt {attempt}/4")
 
 
+def _current_app(mode: str):
+    if mode == "solver":
+        from src.solver_graph import solver_app
+
+        return solver_app, "solver"
+    from src.creator_graph import creator_app
+
+    return creator_app, "creator"
+
+
+def _understanding_card(state: dict) -> None:
+    """Step 12 HITL-1: verify understanding + agent doubts before drafting."""
+    if state.get("pending_approval") != "understanding":
+        return
+    card = understanding_card_data(state)
+    st.warning("HITL-1: confirm understanding before the agent drafts")
+    st.write(card["summary"])
+    if card["question"]:
+        st.write(f"Agent asks: {card['question']}")
+    num = st.number_input("num_tests (editable)", min_value=1, max_value=50,
+                          value=int(card.get("num_tests") or 8), step=1,
+                          key="hitl_num_tests")
+    answer = st.text_input("corrections / answers (optional)",
+                           key="hitl_understanding_answer")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Confirm & Continue", key="hitl_confirm"):
+            _resume_hitl({"human_answer": answer or "confirmed",
+                          "understanding_confirmed": True,
+                          "hitl_num_tests": int(num)})
+    with col_b:
+        if st.button("Answer + Continue", key="hitl_answer"):
+            _resume_hitl({"human_answer": answer,
+                          "understanding_confirmed": True,
+                          "hitl_num_tests": int(num)})
+
+
+def _clarify_popup(state: dict) -> None:
+    """Step 12 mid-run clarify: repair stuck — answer or skip/auto-retry."""
+    if state.get("pending_approval") != "clarify":
+        return
+    info = clarify_data(state)
+    st.error(f"Clarify needed (repair attempt "
+             f"{info['attempt']}). Failing: "
+             f"{[r.get('test_id') for r in info['failing']]}")
+    if info["question"]:
+        st.write(info["question"])
+    answer = st.text_input("guidance for repair (optional)",
+                           key="hitl_clarify_answer")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Submit + Resume", key="hitl_clarify_submit"):
+            _resume_hitl({"human_answer": answer})
+    with col_b:
+        if st.button("Skip / auto-retry", key="hitl_clarify_skip"):
+            _resume_hitl({"human_answer": ""})
+
+
+def _final_approval_view(state: dict) -> None:
+    """Step 12 HITL-2: approve or decline the final problem/solution."""
+    if state.get("pending_approval") not in ("promote", "optimize"):
+        return
+    info = final_approval_data(state)
+    st.warning(f"HITL-2: final approval "
+               f"(pass rate {info['pass_rate']}, total {info['total_ms']} ms)")
+    reason = st.text_input("decline reason (required to decline)",
+                           key="hitl_decline_reason")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Approve", key="hitl_approve"):
+            _resume_hitl({"human_approved_promote": True,
+                          "human_approved_opt": True,
+                          "human_answer": ""})
+    with col_b:
+        if st.button("Decline + reason", key="hitl_decline"):
+            if not reason.strip():
+                st.error("give a decline reason first")
+            else:
+                _resume_hitl({"human_approved_promote": False,
+                              "human_approved_opt": False,
+                              "human_answer": reason})
+
+
+def _resume_hitl(values: dict) -> None:
+    """Apply human values to the paused thread and resume the run."""
+    thread_id = (st.session_state.get("agent_state") or {}).get("job_id") \
+        or "ui-job-1"
+    payload = st.session_state.get("last_payload") or {}
+    mode = st.session_state.get("last_mode") or "creator"
+    num = values.pop("hitl_num_tests", None)
+    if num is not None:
+        cur = st.session_state.get("agent_state") or {}
+        req = dict(cur.get("requirements") or {})
+        if req:
+            values["requirements"] = {**req, "num_tests": int(num)}
+    try:
+        app, _ = _current_app(mode)
+        new_state = update_and_resume(app, thread_id, values, payload)
+    except Exception as exc:  # noqa: BLE001 - surface to UI
+        st.error(f"resume failed: {exc}")
+        return
+    st.session_state["agent_state"] = new_state
+    st.rerun()
+
+
 def main() -> None:
     st.title("LeetCode Agent")
     with st.sidebar:
@@ -81,9 +190,14 @@ def main() -> None:
 
     _status_banner(state)
 
-    stages = stages_for_mode(mode if mode in ("creator", "solver") else "creator")
+    _understanding_card(state)
+    _clarify_popup(state)
+    _final_approval_view(state)
+
+    stages = stages_for_mode(
+        mode if mode in ("creator", "solver") else "creator", include_hitl=True)
     if mode == "solver":
-        stages = SOLVER_STAGES
+        stages = stages_for_mode("solver", include_hitl=True)
     with st.status("Stages", expanded=False):
         _stage_stepper(stages, completed, attempt=int(state.get("attempt", 0) or 0))
 
@@ -144,30 +258,28 @@ def main() -> None:
                     req.setdefault("num_tests", int(num_tests))
                     from src.creator_graph import creator_app
 
+                    invoke_payload = {"requirements_path": _save_tmp(req, "req"),
+                                      "require_understanding": True}
                     chunks = list(
-                        stream_run(
-                            creator_app,
-                            {"requirements_path": _save_tmp(req, "req")},
-                            thread_id,
-                        )
-                    )
-                    stages = CREATOR_STAGES
+                        stream_run(creator_app, invoke_payload, thread_id))
+                    stages = stages_for_mode("creator", include_hitl=True)
                     completed = completed_stages_from_stream(chunks)
                     state = get_state(thread_id, app=creator_app)
+                    st.session_state["last_payload"] = invoke_payload
+                    st.session_state["last_mode"] = "creator"
                 elif mode == "solver":
                     prob = payload if payload else _load_example_problem()
                     from src.solver_graph import solver_app
 
+                    invoke_payload = {"problem_path": _save_tmp(prob, "prob"),
+                                      "require_understanding": True}
                     chunks = list(
-                        stream_run(
-                            solver_app,
-                            {"problem_path": _save_tmp(prob, "prob")},
-                            thread_id,
-                        )
-                    )
-                    stages = SOLVER_STAGES
+                        stream_run(solver_app, invoke_payload, thread_id))
+                    stages = stages_for_mode("solver", include_hitl=True)
                     completed = completed_stages_from_stream(chunks)
                     state = get_state(thread_id, app=solver_app)
+                    st.session_state["last_payload"] = invoke_payload
+                    st.session_state["last_mode"] = "solver"
                 else:  # review: read-only
                     from src.graph import build_graph
 

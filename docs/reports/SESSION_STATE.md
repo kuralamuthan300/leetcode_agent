@@ -1,9 +1,9 @@
 # SESSION_STATE — resume here, do NOT re-scan repo
 
-current_step: 12
-last_verify: Step 11 done — uv run pytest tests/test_ui_smoke.py -v 4 passed; full suite 79 passed 1 skipped; imports ok (9 creator / 13 solver stages); streamlit 1.65.0.
-files_touched: ui/agent_client.py, ui/app.py, pyproject.toml (+ uv.lock), tests/test_ui_smoke.py, docs/reports/SESSION_STATE.md
-next_step: implement Step 12 (HITL understanding gate + clarify + final approve/decline) via Build Mode
+current_step: done
+last_verify: Step 13 done — tests/test_ui_e2e_step13.py 3 passed (requirements num_tests=5 -> understanding confirm -> streamed stages -> 5-row table -> approve; decline path; solver flow; audit has understanding_confirmed + promoted/accepted); full suite 91 passed 1 skipped; README documents UI + HITL buttons.
+files_touched: tests/test_ui_e2e_step13.py, ui/agent_client.py (require_understanding param), README.md, docs/reports/SESSION_STATE.md
+next_step: none — build plan complete (Steps 0-13)
 
 ## Rule
 - Startup reads: AGENTS.md + this file + current Step section only.

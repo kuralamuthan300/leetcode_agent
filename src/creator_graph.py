@@ -124,6 +124,10 @@ def intake_validate(state: CreatorState) -> dict:
             "mode": "creator",
             "attempt": int(state.get("attempt") or 0),
             "errors": errors,
+            # Step 12: clear stale HITL gate flags on resume; downstream
+            # approval nodes re-assert them when a pause is still needed.
+            "needs_human": False,
+            "pending_approval": None,
         }
     req_path = state.get("requirements_path")
     if not req_path:
@@ -150,14 +154,107 @@ def intake_validate(state: CreatorState) -> dict:
     }
 
 
+def summarize_understanding(state: CreatorState) -> dict:
+    """Step 12 HITL-1: render interpreted requirements + questions for review.
+
+    Deterministic (no LLM) so the gate never depends on model availability.
+    """
+    errors = _errors(state)
+    req = state.get("requirements") or {}
+    category = req.get("category", "?")
+    difficulty = req.get("difficulty", "?")
+    num_tests = req.get("num_tests", 8)
+    hint = req.get("constraints_hint") or "none given"
+    extra = req.get("extra") or "none"
+    summary = (
+        f"Category: {category}. Difficulty: {difficulty}. "
+        f"Tests to generate: {num_tests}. Constraints hint: {hint}. "
+        f"Extra: {extra}. "
+        "I will draft a NEW original LeetCode-style problem with a snake_case "
+        "function name, typed signature, 1-3 worked examples, and 2+ constraints."
+    )
+    questions = []
+    if not req.get("constraints_hint"):
+        questions.append(
+            "No constraints hint given — what max input size (n) should tests target?"
+        )
+    questions.append(
+        "Confirm category/difficulty/num_tests, or reply with corrections."
+    )
+    return {
+        "understanding_summary": summary,
+        "human_question": " ".join(questions),
+        "errors": errors,
+    }
+
+
+def request_understanding_approval(state: CreatorState) -> dict:
+    """Step 12 HITL-1 gate: pause before any heavy LLM/Docker work.
+
+    Resume with human_answer (or understanding_confirmed=True) to continue.
+    require_understanding=True enforces the pause; None/False auto-passes
+    for headless runs (legacy compat, mirroring Step 10 gates).
+    """
+    errors = _errors(state)
+    if state.get("human_answer") or state.get("understanding_confirmed"):
+        try:
+            log_decision(state.get("workdir"), stage="creator.understanding",
+                         decision="understanding_confirmed",
+                         reason=str(state.get("human_answer") or "confirmed"))
+        except Exception:
+            pass
+        return {"pending_approval": None, "needs_human": False,
+                "understanding_confirmed": True, "errors": errors}
+    if state.get("require_understanding"):
+        errors.append("understanding: awaiting human confirm before drafting")
+        try:
+            log_decision(state.get("workdir"), stage="creator.understanding",
+                         decision="pending", reason="awaiting HITL-1 confirm")
+        except Exception:
+            pass
+        return {"pending_approval": "understanding", "needs_human": True,
+                "errors": errors}
+    return {"pending_approval": None, "errors": errors}
+
+
+def request_clarify(state: CreatorState) -> dict:
+    """Step 12 mid-run clarify: repair is stuck — ask the human instead of
+    silently retrying into flag_human. Resume with human_answer to retry
+    repair with the answer as context, or skip to auto-retry."""
+    errors = _errors(state)
+    failing = _failure_context(state)
+    results = state.get("test_results") or []
+    bad_ids = [str(r.get("test_id")) for r in results
+               if isinstance(r, dict) and not r.get("passed")][:5]
+    question = (
+        f"Repair stuck at attempt {int(state.get('attempt') or 0)}/{MAX_REPAIRS}. "
+        f"Failing tests: {bad_ids or 'see log'}. {failing}"
+        "Reply with guidance (or nothing to auto-retry)."
+    )
+    try:
+        log_decision(state.get("workdir"), stage="creator.clarify",
+                     decision="pending", reason=f"stuck: {bad_ids}")
+    except Exception:
+        pass
+    return {"pending_approval": "clarify", "needs_human": True,
+            "human_question": question, "clarify_asked": True, "errors": errors}
+
+
 def draft_problem(state: CreatorState) -> dict:
     """Heavy: invent problem shell (testcases are placeholders, replaced next)."""
     errors = _errors(state)
     req = state.get("requirements") or {}
+    human_ctx = ""
+    if state.get("human_answer"):
+        human_ctx = (
+            "\nHuman clarification from requirements review (must respect): "
+            f"{state.get('human_answer')}\n"
+        )
     prompt = (
         "You create LeetCode-style coding problems as JSON.\n"
         f"Category: {req.get('category')}. Difficulty: {req.get('difficulty')}. Language: python.\n"
         f"Constraints hint: {req.get('constraints_hint')}. Extra notes: {req.get('extra')}.\n"
+        f"{human_ctx}"
         "Invent a NEW original problem in this category (do not copy known problems).\n"
         "Pick a short snake_case function name and a typed signature like "
         '"def solve(nums: list[int]) -> int:".\n'
@@ -329,15 +426,25 @@ def repair_solution(state: CreatorState) -> dict:
     attempt = int(state.get("attempt") or 0) + 1
     spec = state.get("problem_spec")
     req = state.get("requirements") or {}
+    out: dict = {"attempt": attempt, "errors": errors}
+    if state.get("human_approved_promote") is False:
+        # Step 12: a declined promotion retries repair once with the
+        # decline reason as context, then gets a clean approval pass.
+        out["human_approved_promote"] = None
+    human_ctx = ""
+    if state.get("human_answer"):
+        human_ctx = (f"Human feedback (must respect): {state.get('human_answer')}\n")
     try:
         ProblemSpec.model_validate(spec)
-        return {"attempt": attempt, "errors": errors}  # spec ok; oracle retries
+        out.update({"errors": errors})
+        return out  # spec ok; oracle retries
     except Exception as exc:
         errors.append(f"repair: spec invalid, regenerating: {exc}")
     prompt = (
         "The problem JSON below is INVALID or inconsistent. Errors:\n"
         f"{errors[-2:]}\nRequirements: category={req.get('category')}, "
         f"difficulty={req.get('difficulty')}, num_tests={req.get('num_tests')}.\n"
+        f"{human_ctx}"
         f"Current spec: {json.dumps(spec)[:3000]}\n"
         "Return a corrected FULL problem JSON (keys: id, title, difficulty, statement, "
         "function_name, signature, examples, constraints, testcases) with unique "
@@ -350,7 +457,8 @@ def repair_solution(state: CreatorState) -> dict:
                           retry_count=min(attempt, 1))
     except Exception as exc:
         errors.append(f"repair: {exc}")
-        return {"attempt": attempt, "errors": errors}
+        out.update({"errors": errors})
+        return out
     if isinstance(fixed, dict):
         fixed = dict(fixed)
         fixed["difficulty"] = req.get("difficulty", "easy")
@@ -358,9 +466,11 @@ def repair_solution(state: CreatorState) -> dict:
             TestCase.model_validate(fixed.get("testcases", [{}])[0])
         except Exception:
             pass
-        return {"attempt": attempt, "problem_spec": fixed, "errors": errors}
+        out.update({"problem_spec": fixed, "errors": errors})
+        return out
     errors.append("repair: LLM did not return a JSON object")
-    return {"attempt": attempt, "errors": errors}
+    out.update({"errors": errors})
+    return out
 
 
 def promote_save(state: CreatorState) -> dict:
@@ -414,16 +524,20 @@ def request_promote_approval(state: CreatorState) -> dict:
     None/True auto-passes for automated runs (legacy compat); prod CLI
     should set False initially and resume with True after review, or use
     build_creator_graph(with_interrupt=True) which pauses before promote.
+
+    Step 12: a decline (False + human_answer reason) is logged as
+    "declined" and routed to repair_solution when budget remains,
+    else flag_human. Never silently dropped.
     """
     errors = _errors(state)
     if state.get("human_approved_promote") is False:
-        errors.append("promote: awaiting human approval")
+        reason = state.get("human_answer") or "human declined promotion"
         try:
             log_decision(state.get("workdir"), stage="creator.promote_approval",
-                         decision="pending", reason="human_approved_promote is False")
+                         decision="declined", reason=str(reason))
         except Exception:
             pass
-        return {"pending_approval": "promote", "needs_human": True, "errors": errors}
+        return {"pending_approval": "promote", "errors": errors}
     return {"pending_approval": None, "errors": errors}
 
 
@@ -437,11 +551,22 @@ def flag_human(state: CreatorState) -> dict:
 # ---------------------------------------------------------------- routing
 
 def route_after_intake(state: CreatorState) -> str:
+    if state.get("needs_human"):
+        return "flag_human"
+    return "summarize_understanding"
+
+
+def route_after_understanding(state: CreatorState) -> str:
     return "flag_human" if state.get("needs_human") else "draft_problem"
 
 
 def _repair_or_human(state: CreatorState) -> str:
     if int(state.get("attempt") or 0) < MAX_REPAIRS:
+        if (int(state.get("attempt") or 0) >= 2
+                and state.get("allow_clarify")
+                and not state.get("clarify_asked")
+                and not state.get("human_answer")):
+            return "request_clarify"
         return "repair_solution"
     return "flag_human"
 
@@ -460,6 +585,13 @@ def route_after_tests(state: CreatorState) -> str:
 
 
 def route_after_promote_approval(state: CreatorState) -> str:
+    if state.get("human_approved_promote") is False:
+        # Step 12 decline: retry repair with the reason as context when
+        # budget remains, else stop for human review. Decline is logged
+        # in request_promote_approval, never silently dropped.
+        if int(state.get("attempt") or 0) < MAX_REPAIRS:
+            return "repair_solution"
+        return "flag_human"
     return "flag_human" if state.get("needs_human") else "promote_save"
 
 
@@ -472,6 +604,9 @@ def build_creator_graph(checkpointer=None, with_interrupt: bool = False) -> obje
     """
     builder = StateGraph(CreatorState)
     builder.add_node("intake_validate", intake_validate)
+    builder.add_node("summarize_understanding", summarize_understanding)
+    builder.add_node("request_understanding_approval", request_understanding_approval)
+    builder.add_node("request_clarify", request_clarify)
     builder.add_node("draft_problem", draft_problem)
     builder.add_node("generate_tests", generate_tests)
     builder.add_node("format_dedup", format_dedup)
@@ -485,7 +620,13 @@ def build_creator_graph(checkpointer=None, with_interrupt: bool = False) -> obje
     builder.add_edge(START, "intake_validate")
     builder.add_conditional_edges(
         "intake_validate", route_after_intake,
+        {"summarize_understanding": "summarize_understanding",
+         "flag_human": "flag_human"})
+    builder.add_edge("summarize_understanding", "request_understanding_approval")
+    builder.add_conditional_edges(
+        "request_understanding_approval", route_after_understanding,
         {"draft_problem": "draft_problem", "flag_human": "flag_human"})
+    builder.add_edge("request_clarify", "flag_human")
     builder.add_edge("draft_problem", "generate_tests")
     builder.add_edge("generate_tests", "format_dedup")
     builder.add_edge("format_dedup", "oracle_solution")
@@ -493,15 +634,17 @@ def build_creator_graph(checkpointer=None, with_interrupt: bool = False) -> obje
     builder.add_conditional_edges(
         "static_scan", route_after_scan,
         {"run_tests": "run_tests", "repair_solution": "repair_solution",
-         "flag_human": "flag_human"})
+         "request_clarify": "request_clarify", "flag_human": "flag_human"})
     builder.add_conditional_edges(
         "run_tests", route_after_tests,
         {"request_promote_approval": "request_promote_approval",
          "repair_solution": "repair_solution",
+         "request_clarify": "request_clarify",
          "flag_human": "flag_human"})
     builder.add_conditional_edges(
         "request_promote_approval", route_after_promote_approval,
-        {"promote_save": "promote_save", "flag_human": "flag_human"})
+        {"promote_save": "promote_save", "flag_human": "flag_human",
+         "repair_solution": "repair_solution"})
     builder.add_edge("repair_solution", "oracle_solution")
     builder.add_edge("promote_save", END)
     builder.add_edge("flag_human", END)

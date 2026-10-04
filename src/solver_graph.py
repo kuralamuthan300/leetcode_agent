@@ -125,6 +125,10 @@ def load_validate(state: SolverState) -> dict:
             "mode": "solver",
             "attempt": int(state.get("attempt") or 0),
             "errors": errors,
+            # Step 12: clear stale HITL gate flags on resume; downstream
+            # approval nodes re-assert them when a pause is still needed.
+            "needs_human": False,
+            "pending_approval": None,
         }
     prob_path = state.get("problem_path")
     if not prob_path:
@@ -151,14 +155,97 @@ def load_validate(state: SolverState) -> dict:
     }
 
 
+def summarize_problem(state: SolverState) -> dict:
+    """Step 12 HITL-1: render interpreted problem + questions for review.
+
+    Deterministic (no LLM) so the gate never depends on model availability.
+    """
+    errors = _errors(state)
+    spec = state.get("problem_spec") or {}
+    cases = spec.get("testcases") or []
+    summary = (
+        f"Problem: {spec.get('title', '?')} "
+        f"({spec.get('difficulty', '?')}). "
+        f"Function: {spec.get('function_name', '?')}. "
+        f"Tests to run: {len(cases)}. "
+        f"Constraints: {spec.get('constraints') or 'none'}. "
+        "I will write a correct solution, then optimize it."
+    )
+    return {
+        "understanding_summary": summary,
+        "human_question": (
+            "Confirm the signature/constraints above, or reply with corrections."
+        ),
+        "errors": errors,
+    }
+
+
+def request_understanding_approval(state: SolverState) -> dict:
+    """Step 12 HITL-1 gate: pause before any heavy LLM/Docker work.
+
+    Resume with human_answer (or understanding_confirmed=True) to continue.
+    require_understanding=True enforces the pause; None/False auto-passes
+    for headless runs (legacy compat, mirroring Step 10 gates).
+    """
+    errors = _errors(state)
+    if state.get("human_answer") or state.get("understanding_confirmed"):
+        try:
+            log_decision(state.get("workdir"), stage="solver.understanding",
+                         decision="understanding_confirmed",
+                         reason=str(state.get("human_answer") or "confirmed"))
+        except Exception:
+            pass
+        return {"pending_approval": None, "needs_human": False,
+                "understanding_confirmed": True, "errors": errors}
+    if state.get("require_understanding"):
+        errors.append("understanding: awaiting human confirm before solving")
+        try:
+            log_decision(state.get("workdir"), stage="solver.understanding",
+                         decision="pending", reason="awaiting HITL-1 confirm")
+        except Exception:
+            pass
+        return {"pending_approval": "understanding", "needs_human": True,
+                "errors": errors}
+    return {"pending_approval": None, "errors": errors}
+
+
+def request_clarify(state: SolverState) -> dict:
+    """Step 12 mid-run clarify: repair is stuck — ask the human instead of
+    silently retrying into flag_human."""
+    errors = _errors(state)
+    failing = _failure_context(state)
+    results = state.get("test_results") or []
+    bad_ids = [str(r.get("test_id", "?")) for r in results
+               if isinstance(r, dict) and not r.get("passed")][:5]
+    question = (
+        f"Repair stuck at attempt {int(state.get('attempt') or 0)}/{MAX_REPAIRS}. "
+        f"Failing tests: {bad_ids or 'see log'}. {failing}"
+        "Reply with guidance (or nothing to auto-retry)."
+    )
+    try:
+        log_decision(state.get("workdir"), stage="solver.clarify",
+                     decision="pending", reason=f"stuck: {bad_ids}")
+    except Exception:
+        pass
+    return {"pending_approval": "clarify", "needs_human": True,
+            "human_question": question, "clarify_asked": True, "errors": errors}
+
+
 def initial_solution(state: SolverState) -> dict:
     """Heavy: write an initial correct solution for the problem spec."""
     errors = _errors(state)
     spec = state.get("problem_spec") or {}
+    human_ctx = ""
+    if state.get("human_answer"):
+        human_ctx = (
+            "Human clarification from problem review (must respect): "
+            f"{state.get('human_answer')}\n"
+        )
     prompt = (
         f"Write a correct, efficient Python solution for: {spec.get('statement')}\n"
         f"Signature: {spec.get('signature')}. Examples: {spec.get('examples')}. "
         f"Constraints: {spec.get('constraints')}.\n"
+        f"{human_ctx}"
         f"{_failure_context(state)}"
         "Define exactly the function above (plus any helpers). Use only allowlisted "
         "stdlib modules (math, heapq, collections, bisect, itertools, functools, typing). "
@@ -243,11 +330,20 @@ def repair_solution(state: SolverState) -> dict:
     errors = _errors(state)
     attempt = int(state.get("attempt") or 0) + 1
     spec = state.get("problem_spec") or {}
+    out: dict = {"attempt": attempt, "errors": errors}
+    if state.get("human_approved_opt") is False:
+        # Step 12: a declined optimization retries repair once with the
+        # decline reason as context, then gets a clean approval pass.
+        out["human_approved_opt"] = None
+    human_ctx = ""
+    if state.get("human_answer"):
+        human_ctx = (f"Human feedback (must respect): {state.get('human_answer')}\n")
     prompt = (
         "The Python solution below FAILS. Fix it so all tests pass.\n"
         f"Statement: {spec.get('statement')}\n"
         f"Signature (define exactly this function): {spec.get('signature')}\n"
         f"Examples: {spec.get('examples')}. Constraints: {spec.get('constraints')}.\n"
+        f"{human_ctx}"
         f"{_failure_context(state)}"
         f"Current code:\n{state.get('solution_code') or ''}\n"
         f"Safety flags (must eliminate): {state.get('safety_flags') or []}\n"
@@ -260,12 +356,15 @@ def repair_solution(state: SolverState) -> dict:
             "repair_solution", prompt, retry_count=min(attempt, 1))
     except Exception as exc:
         errors.append(f"repair_solution: {exc}")
-        return {"attempt": attempt, "errors": errors}
+        out.update({"errors": errors})
+        return out
     code = _strip_code_fences(str(code))
     if not code:
         errors.append("repair_solution: LLM returned empty code")
-        return {"attempt": attempt, "errors": errors}
-    return {"attempt": attempt, "solution_code": code, "errors": errors}
+        out.update({"errors": errors})
+        return out
+    out.update({"solution_code": code, "errors": errors})
+    return out
 
 
 # ---------------------------------------------------------------- optimizer (Step 9)
@@ -551,12 +650,17 @@ def request_opt_approval(state: SolverState) -> dict:
     while still writing report.md. None/True auto-passes for automated
     runs (legacy compat); prod should use strict graph
     (interrupt_before accept) or set False then resume with True.
+
+    Step 12: a decline (False + human_answer reason) is logged as
+    "declined" and routed to repair_solution when budget remains,
+    else flag_human. Never silently dropped.
     """
     errors = _errors(state)
     if state.get("human_approved_opt") is False:
+        reason = state.get("human_answer") or "human declined optimization"
         try:
             log_decision(state.get("workdir"), stage="solver.opt_approval",
-                         decision="pending", reason="human_approved_opt is False")
+                         decision="declined", reason=str(reason))
         except Exception:
             pass
         return {"pending_approval": "optimize", "errors": errors}
@@ -573,11 +677,22 @@ def flag_human(state: SolverState) -> dict:
 # ---------------------------------------------------------------- routing
 
 def route_after_load(state: SolverState) -> str:
+    if state.get("needs_human"):
+        return "flag_human"
+    return "summarize_problem"
+
+
+def route_after_understanding(state: SolverState) -> str:
     return "flag_human" if state.get("needs_human") else "initial_solution"
 
 
 def _repair_or_human(state: SolverState) -> str:
     if int(state.get("attempt") or 0) < MAX_REPAIRS:
+        if (int(state.get("attempt") or 0) >= 2
+                and state.get("allow_clarify")
+                and not state.get("clarify_asked")
+                and not state.get("human_answer")):
+            return "request_clarify"
         return "repair_solution"
     return "flag_human"
 
@@ -601,6 +716,16 @@ def route_after_opt_scan(state: SolverState) -> str:
     return "request_opt_approval"
 
 
+def route_after_opt_approval(state: SolverState) -> str:
+    if state.get("human_approved_opt") is False:
+        # Step 12 decline: retry repair with the reason as context when
+        # budget remains, else stop for human review.
+        if int(state.get("attempt") or 0) < MAX_REPAIRS:
+            return "repair_solution"
+        return "flag_human"
+    return "accept_or_rollback"
+
+
 def route_after_accept(state: SolverState) -> str:
     if (
         state.get("opt_status") == "accepted"
@@ -620,6 +745,9 @@ def build_solver_graph(checkpointer=None, with_interrupt: bool = False) -> objec
     """
     builder = StateGraph(SolverState)
     builder.add_node("load_validate", load_validate)
+    builder.add_node("summarize_problem", summarize_problem)
+    builder.add_node("request_understanding_approval", request_understanding_approval)
+    builder.add_node("request_clarify", request_clarify)
     builder.add_node("initial_solution", initial_solution)
     builder.add_node("static_scan", static_scan)
     builder.add_node("run_tests_timed", run_tests_timed)
@@ -637,16 +765,27 @@ def build_solver_graph(checkpointer=None, with_interrupt: bool = False) -> objec
     builder.add_edge(START, "load_validate")
     builder.add_conditional_edges(
         "load_validate", route_after_load,
-        {"initial_solution": "initial_solution", "flag_human": "flag_human"})
+        {"summarize_problem": "summarize_problem",
+         "flag_human": "flag_human"})
+    builder.add_edge("summarize_problem", "request_understanding_approval")
+    builder.add_conditional_edges(
+        "request_understanding_approval", route_after_understanding,
+        {"initial_solution": "initial_solution",
+         "flag_human": "flag_human"})
+    builder.add_edge("request_clarify", "flag_human")
     builder.add_edge("initial_solution", "static_scan")
     builder.add_conditional_edges(
         "static_scan", route_after_scan,
         {"run_tests_timed": "run_tests_timed",
-         "repair_solution": "repair_solution", "flag_human": "flag_human"})
+         "repair_solution": "repair_solution",
+         "request_clarify": "request_clarify",
+         "flag_human": "flag_human"})
     builder.add_conditional_edges(
         "run_tests_timed", route_after_tests,
         {"snapshot_baseline": "snapshot_baseline",
-         "repair_solution": "repair_solution", "flag_human": "flag_human"})
+         "repair_solution": "repair_solution",
+         "request_clarify": "request_clarify",
+         "flag_human": "flag_human"})
     builder.add_edge("repair_solution", "static_scan")
     builder.add_edge("snapshot_baseline", "analyze_complexity")
     builder.add_edge("analyze_complexity", "propose_optimization")
@@ -656,7 +795,11 @@ def build_solver_graph(checkpointer=None, with_interrupt: bool = False) -> objec
         {"run_optimized": "run_optimized",
          "request_opt_approval": "request_opt_approval"})
     builder.add_edge("run_optimized", "request_opt_approval")
-    builder.add_edge("request_opt_approval", "accept_or_rollback")
+    builder.add_conditional_edges(
+        "request_opt_approval", route_after_opt_approval,
+        {"accept_or_rollback": "accept_or_rollback",
+         "repair_solution": "repair_solution",
+         "flag_human": "flag_human"})
     builder.add_conditional_edges(
         "accept_or_rollback", route_after_accept,
         {"snapshot_baseline": "snapshot_baseline",

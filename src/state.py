@@ -28,3 +28,17 @@ class AgentState(TypedDict, total=False):
     human_approved_opt: bool | None
     pending_approval: str | None
     audit_path: str | None
+    # Step 12: HITL understanding gate + mid-run clarify.
+    # pending_approval values: understanding | clarify | promote | optimize.
+    understanding_summary: str | None
+    human_question: str | None
+    human_answer: str | None
+    # Step 12 control flags (runtime schema channels so invoke payloads
+    # and update_state values survive graph I/O):
+    # require_understanding=True enforces the HITL-1 pause,
+    # allow_clarify=True enables the mid-run clarify detour,
+    # understanding_confirmed/clarify_asked track gate progress.
+    require_understanding: bool | None
+    allow_clarify: bool | None
+    understanding_confirmed: bool | None
+    clarify_asked: bool | None

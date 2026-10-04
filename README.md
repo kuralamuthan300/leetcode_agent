@@ -49,15 +49,27 @@ scan/run/decision appended to `<jobdir>/audit.jsonl`. Prod pauses:
 `build_graph_strict()` compile with `interrupt_before`.
 Security table: `docs/security_tests.md`.
 
-## Web UI (Step 11+, planned)
+## Web UI (Steps 11-13)
 
 ```bash
 uv run streamlit run ui/app.py
 ```
 
-- Modes: `creator | solver | auto | review` (sidebar).
-- Inputs: category, difficulty, `num_tests` (default 8), constraints hint.
-- Live status (`idle|running|awaiting approval|done|needs_human`) + stage stepper + tabs `Problem | Solution | Tests`.
-- HITL-1: after requirements, understanding card (`Confirm & Continue` / `Answer + Continue`) — no drafting before confirm.
-- HITL-2: at end, approve problem/solution or decline with reason (logged to `audit.jsonl`).
+- Modes (sidebar radio): `creator | solver | auto | review`.
+  `review` is read-only: pick a `job_id` to inspect state + `audit.jsonl` + `report.md`.
+- Inputs: `category` dropdown, `difficulty` radio, `num_tests` number input
+  (default 8, feeds `RequirementsSpec.num_tests` -> generated test count),
+  `constraints_hint`, file upload / textarea / example picker (`two_sum_demo`).
+- Live status banner (`idle|running|awaiting approval|done|needs_human` +
+  `job_id, mode, attempt, opt_round`) + stage stepper streamed from
+  `app.stream(stream_mode="updates")`, + tabs `Problem | Solution | Tests`
+  (`test_id|input|expected|actual|pass|mean_ms`, hidden-test toggle).
+- HITL-1 understanding card: summary + agent questions + editable
+  `num_tests`, then `[Confirm & Continue]` / `[Answer + Continue]` —
+  no heavy LLM/Docker runs before confirm.
+- Mid-run clarify popup (repair stuck, attempt>=2): failing tests +
+  question, `[Submit + Resume]` / `[Skip/auto-retry]`.
+- HITL-2 final approval: problem + solution + pass rate + total ms, then
+  `[Approve]` / `[Decline + reason]` (declines are logged to `audit.jsonl`
+  and route back to repair while budget remains).
 - See `docs/architecture/LEETCODE_AGENT_PLAN.md` Sec 12 (UI) + Sec 13 (HITL), build steps 11–13 in `docs/build/BUILD_PLAN_STEP_BY_STEP.md`.

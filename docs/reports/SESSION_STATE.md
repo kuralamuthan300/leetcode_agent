@@ -1,9 +1,9 @@
 # SESSION_STATE — resume here, do NOT re-scan repo
 
-current_step: 8
-last_verify: pass Step7 — `uv run pytest tests/test_creator_graph.py -v` (7 passed), real Ollama run arrays demo -> unique_pair_sum 8/8 oracle pass, promoted (attempt 0). Full `uv run pytest -q`: 48 passed, 1 skipped (pre-existing docker-image skip).
-files_touched: src/creator_graph.py, tests/test_creator_graph.py, src/tools/safe_executor.py (daemon-down local fallback)
-next_step: 8 — Solver Subgraph only (src/solver_graph.py)
+current_step: 9
+last_verify: pass Step8 — `uv run pytest tests/test_solver_graph.py -v` (6 passed), demo two_sum solved w/ 3x-averaged timings + repair/scan-block/max-repairs paths. Full `uv run pytest -q`: 54 passed, 1 skipped (pre-existing docker-image skip).
+files_touched: src/solver_graph.py, tests/test_solver_graph.py
+next_step: 9 — Optimizer + Reporter only (extend solver_graph.py + src/tools/reporter.py)
 
 ## Rule
 - Startup reads: AGENTS.md + this file + current Step section only.

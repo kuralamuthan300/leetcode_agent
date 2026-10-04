@@ -19,6 +19,7 @@ registry.jsonl
 
 # OpenCode local plugin deps (auto-commit runs from source)
 .opencode/plugins/*/node_modules/
+.opencode/plugins/*/package-lock.json
 
 # macOS
 .DS_Store

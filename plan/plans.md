@@ -1,6 +1,7 @@
 # Execution Plan — LangGraph DSA Solver (steps 1–9)
 
 Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-13
+Progress: Steps 1–5 implemented on `task/step-1-5` (17 tests green).
 
 ## Step 1 — IntentClarifier LLM
 Replace heuristic-only with `deepseek-r1:1.5b` rewrite pass; keep max-3 self-loop

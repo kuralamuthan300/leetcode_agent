@@ -1,7 +1,7 @@
 # Agent Architecture — LangGraph DSA Solver
 
-Branch: `task/initial-plan` | Updated: 2026-10-13
-Status: scaffold + stubs implemented, 7 tests passing. LLM prompts + guardrails pending (see `guardrails.md`, `plans.md`).
+Branch: `task/step-1-5` | Updated: 2026-10-13
+Status: Steps 1-5 implemented (LLM nodes + guardrails); Step 6+ pending (see `plans.md`).
 
 ## Goal
 Terminal-driven LangGraph agent that solves data-structures & algorithms problems,
@@ -30,9 +30,11 @@ graph TD
 ```
 
 ## Models (Ollama)
-- Heavy `gemma4:31b-cloud` (verified via `ollama list`): Planner, Coder, Evaluator.
-- Small `deepseek-r1:1.5b` (local 1.1GB): IntentClarifier, TestCaseGen.
-- `src/agent/llms.py`: `get_small()` temp 0, `get_heavy()` temp 0.2.
+- Heavy `gemma4:31b-cloud`: Planner, Coder, Evaluator.
+- Small `gpt-oss:20b-cloud`: IntentClarifier, TestCaseGen (switched from
+  `deepseek-r1:1.5b` — cleaner structured output; thinking stays out of content).
+- `src/agent/llms.py`: `get_small()` temp 0 / 4096 tokens / 90s timeout,
+  `get_heavy()` temp 0.2 / 180s timeout.
 - Env: `OLLAMA_HEAVY`, `OLLAMA_SMALL`, `OLLAMA_BASE_URL` (default `http://localhost:11434`).
 
 ## State (`src/agent/state.py`)
@@ -43,16 +45,18 @@ graph TD
 `feedback, iterations, output_path`.
 
 ## Nodes (`src/agent/nodes.py`)
-1. IntentClarifier (small, self-loop max 3): normalize statement; `is_intent_clear()`
-   heuristic (len>=30 + keyword) now, small-LLM rewrite later; emits
+1. IntentClarifier (small, self-loop max 3): LLM rewrite per iteration
+   (escalating specificity), heuristic `is_intent_clear()` score; emits
    `intent_iterations`, `intent_clear`; router exits to Planner when clear or iters>=3.
-2. Planner (heavy): algo + complexity + steps; consumes `feedback` on retry.
-3. TestCaseGen (small): base + edge cases as `{id,input,expected}` (stub).
-4. Coder (heavy + `python_sandbox` tool): generate code, then mandatory guardrail
-   gate (`guardrail.check()` — AST allowlist, file read/write denied, fail-closed)
-   then verify via toolbox (`run_python(code, harness)`); smoke + `guardrail_report`
-   stored in state/output. Full path: `get_heavy().bind_tools([python_toolbox])`.
-5. Evaluator (heavy): run code vs tests, emit `eval` + `feedback` (stub matrix).
+2. Planner (heavy): LLM algo + complexity + steps; consumes `feedback` on retry;
+   deterministic stub fallback.
+3. TestCaseGen (small): LLM JSON `[{id,harness,expected}]` (3-5, harness must
+   `print(solve(...))`); validated + guardrail-screened; `[]` fallback.
+4. Coder (heavy + `python_sandbox` tool): LLM code honoring the `solve`
+   contract, mandatory guardrail gate + smoke, one repair attempt on failure;
+   emits `code`, `coder_smoke`, `guardrail_report`.
+5. Evaluator: runs each harness via gated `run_python`, compares stdout to
+   expected; emits `execution_results`, `eval`, `iterations`.
 6. RunReporter (deterministic, no LLM): consolidate + write JSON.
 
 ## CLI + Output

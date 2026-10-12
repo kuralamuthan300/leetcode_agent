@@ -1,8 +1,24 @@
-"""Node stubs — full prompts land in the build-out step."""
+"""LangGraph nodes: Steps 1-4 LLM-backed, Step 5 guardrailed, Step 6 evaluator.
+
+Every LLM call falls back to deterministic behavior so tests stay hermetic.
+"""
 
 from __future__ import annotations
 
+from . import prompts
+from .prompts import (
+    CODER_REPAIR_SYSTEM,
+    CODER_SYSTEM,
+    INTENT_SYSTEM,
+    PLANNER_SYSTEM,
+    TESTGEN_SYSTEM,
+    extract_code,
+    extract_json_array,
+    try_invoke,
+)
+
 MAX_INTENT_ITERATIONS = 3
+MAX_TESTS = 10
 
 _CLEAR_KEYWORDS = (
     "input",
@@ -33,53 +49,149 @@ def intent_clarifier(state: dict) -> dict:
     n = state.get("intent_iterations", 0) + 1
     req = state.get("requirement", "").strip()
     prior = state.get("clarified_intent", "") or req
-    # TODO: small-LLM rewrite pass (deepseek-r1:1.5b) appended here;
-    # stub keeps prior text and only scores clarity.
-    clear = is_intent_clear(prior)
+    if n == 1:
+        user = f"Requirement:\n{req}"
+    else:
+        user = (
+            "The previous clarification is still too vague. Make it MORE specific: "
+            f"add input/output formats and constraints.\nPrevious:\n{prior}"
+        )
+    rewritten = try_invoke("small", user, INTENT_SYSTEM)
+    text = rewritten if rewritten else prior
     return {
-        "clarified_intent": prior,
+        "clarified_intent": text,
         "intent_iterations": n,
-        "intent_clear": clear,
+        "intent_clear": is_intent_clear(text),
     }
 
 
+def _parse_plan(text: str) -> list[str]:
+    import re
+
+    steps = []
+    for line in text.splitlines():
+        line = re.sub(r"^[\s\-\*\d\.\)]+", "", line).strip()
+        if line:
+            steps.append(line)
+    return steps[:10] or [text.strip()[:500]]
+
+
 def planner(state: dict) -> dict:
+    intent = state.get("clarified_intent", "")
     feedback = state.get("feedback", "")
-    base = [f"Solve: {state.get('clarified_intent', '')[:120]}"]
+    user = f"Problem:\n{intent}"
+    if feedback:
+        user += f"\n\nPrevious attempt failed with this feedback — address it:\n{feedback[:1000]}"
+    text = try_invoke("heavy", user, PLANNER_SYSTEM)
+    if text:
+        return {"plan_steps": _parse_plan(text)}
+    base = [f"Solve: {intent[:120]}"]
     if feedback:
         base.append(f"Address feedback: {feedback[:500]}")
     return {"plan_steps": base}
 
 
+def _valid_test(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    tid = str(item.get("id", "")).strip()
+    harness = str(item.get("harness", "")).strip()
+    expected = item.get("expected", "")
+    if not (tid and harness and isinstance(expected, str) and expected.strip()):
+        return None
+    if "print" not in harness or "solve" not in harness:
+        return None
+    from .tools.guardrail import check
+
+    if not check("", harness)["allowed"]:
+        return None
+    return {"id": tid, "harness": harness, "expected": expected.strip()}
+
+
 def test_case_gen(state: dict) -> dict:
-    return {"test_cases": []}
+    intent = state.get("clarified_intent", "")
+    plan = "\n".join(state.get("plan_steps", []))
+    user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
+    text = try_invoke("small", user, TESTGEN_SYSTEM)
+    if not text:
+        return {"test_cases": []}
+    parsed = extract_json_array(text)
+    if not parsed:
+        return {"test_cases": []}
+    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item))]
+    return {"test_cases": tests}
+
+
+def _smoke(code: str) -> tuple[dict, dict]:
+    from .tools import guardrail_report as gate
+    from .tools.sandbox import run_python
+
+    report = gate(code, "print('smoke: imports ok')")
+    smoke = run_python(code, harness="print('smoke: imports ok')")
+    return smoke, report
 
 
 def coder(state: dict) -> dict:
-    """Generate code (stub: heavy-LLM later), then verify via python toolbox."""
-    from .tools.sandbox import run_python
+    """Generate code with heavy LLM, gate + smoke it, one repair attempt."""
+    intent = state.get("clarified_intent", "")
+    plan = "\n".join(state.get("plan_steps", []))
+    feedback = state.get("feedback", "") or state.get("eval", {}).get("feedback", "")
+    previous = state.get("code", "")
+    user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
+    if feedback:
+        user += f"\n\nMust address this feedback:\n{feedback[:1000]}"
+    if previous and not previous.strip().startswith("# TODO"):
+        user += f"\n\nPrevious code to improve:\n{previous[:4000]}"
 
-    # TODO: replace stub with get_heavy().bind_tools([python_toolbox]) call.
-    code = state.get("code") or "# TODO: implement solution\n"
-    if code.strip().startswith("# TODO"):
-        smoke = run_python(code, harness="print('smoke: imports ok')")
-    else:
-        smoke = run_python(code, harness="print('smoke: imports ok')")
-    return {"code": code, "coder_smoke": smoke}
+    text = try_invoke("heavy", user, CODER_SYSTEM)
+    code = extract_code(text) if text else "# TODO: implement solution\n"
+    smoke, report = _smoke(code)
+
+    if smoke["error"] and not smoke["error"].startswith("blocked:") and text:
+        repair_user = (
+            f"Problem:\n{intent}\n\nFailing code:\n{code[:4000]}"
+            f"\n\nSmoke error:\n{smoke['error'][:1000]}"
+        )
+        fixed = try_invoke("heavy", repair_user, CODER_REPAIR_SYSTEM)
+        if fixed:
+            code = extract_code(fixed)
+            smoke, report = _smoke(code)
+
+    return {"code": code, "coder_smoke": smoke, "guardrail_report": report}
 
 
 def evaluator(state: dict) -> dict:
+    """Run each test harness against the code; fail-closed on empty tests."""
+    from .tools.sandbox import run_python
+
+    code = state.get("code", "")
     tests = state.get("test_cases", [])
-    total = len(tests)
-    return {
-        "execution_results": [],
-        "eval": {
-            "passed": total == 0,
-            "passed_count": 0,
-            "total": total,
-            "feedback": "" if total == 0 else "no test cases generated yet",
-        },
-    }
+    iterations = state.get("iterations", 0) + 1
+    results = []
+    for t in tests:
+        r = run_python(code, harness=t["harness"])
+        ok = not r["error"] and r["stdout"].strip() == t["expected"].strip()
+        results.append(
+            {
+                "test_id": t["id"],
+                "passed": ok,
+                "actual": r["stdout"].strip()[:2000],
+                "expected": t["expected"].strip()[:2000],
+                "error": r["error"][:2000],
+            }
+        )
+    passed_count = sum(1 for r in results if r["passed"])
+    if not tests:
+        ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated"}
+    else:
+        failed = [r["test_id"] for r in results if not r["passed"]]
+        ev = {
+            "passed": passed_count == len(tests),
+            "passed_count": passed_count,
+            "total": len(tests),
+            "feedback": "" if not failed else f"failed tests: {', '.join(failed[:5])}",
+        }
+    return {"execution_results": results, "eval": ev, "iterations": iterations}
 
 
 def run_reporter(state: dict) -> dict:
@@ -103,6 +215,7 @@ def run_reporter(state: dict) -> dict:
         "test_cases": state.get("test_cases", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),
+        "guardrail_report": state.get("guardrail_report", {}),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
     }

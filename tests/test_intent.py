@@ -1,3 +1,15 @@
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_llm(monkeypatch):
+    """Force deterministic fallback (no Ollama) for hermetic tests."""
+    import agent.llms as llms
+
+    monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+
+
 def test_unclear_intent_caps_at_three(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from agent.graph import build_graph

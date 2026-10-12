@@ -29,6 +29,7 @@ class AgentState(TypedDict, total=False):
     test_cases: list[dict[str, Any]]
     code: str
     coder_smoke: dict[str, str]
+    guardrail_report: dict
     execution_results: Annotated[list[ExecutionResult], add]
     eval: EvalReport
     feedback: str

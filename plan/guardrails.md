@@ -1,6 +1,6 @@
 # Guardrails — Coder Sandbox Security
 
-Updated: 2026-10-13 | Status: spec only, not implemented.
+Updated: 2026-10-13 | Status: implemented on `task/step-1-5` (`tools/guardrail.py`, gated `run_python`, `guardrail_report` in state/output, `tests/test_guardrails.py` green).
 Enforcement: fail-closed (blocked code never executes).
 
 ## Threat model

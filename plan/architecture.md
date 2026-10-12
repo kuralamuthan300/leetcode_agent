@@ -63,7 +63,8 @@ Resilience: small 90s / heavy 180s client timeouts; heavy→small fallback sets
 `fallback_used` (planner, coder incl. repair); planner→[tests,coder] fan-out is parallel.
 
 ## CLI + Output
-- `PYTHONPATH=src uv run python -m cli --problem "..." | --file p.md | stdin`.
+- `PYTHONPATH=src uv run python -m cli --problem "..." | --file p.md | stdin pipe`.
+  With no args on a TTY it prompts via `input()` (blank line finishes); piped stdin still read directly.
 - `run_id = run_id_YYYYMMDD_HHMMSS_<6hex>`, overridable via `--run-id`.
 - JSON schema: `run_id, timestamp, models{heavy,small}, requirement, clarified_intent,`
   `intent_iterations, intent_clear, plan_steps, test_cases, code, coder_smoke,`

@@ -17,6 +17,25 @@ def _new_run_id() -> str:
     return f"run_id_{ts}_{uuid.uuid4().hex[:6]}"
 
 
+def _prompt_requirement() -> str:
+    """Interactively read a (possibly multi-line) problem via input().
+
+    Ends on a blank line or EOF. Used when --problem/--file are absent
+    and stdin is a TTY.
+    """
+    console.print("[bold]Enter problem statement (blank line to finish):[/bold]")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input("> ")
+        except EOFError:
+            break
+        if not line.strip():
+            break
+        lines.append(line)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Solve a DSA problem with LangGraph + Ollama")
     src = ap.add_mutually_exclusive_group(required=False)
@@ -29,9 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         requirement = open(args.file).read()
     elif args.problem:
         requirement = args.problem
-    else:
-        console.print("[bold]Enter problem statement (Ctrl-D to finish):[/bold]")
+    elif not sys.stdin.isatty():
         requirement = sys.stdin.read()
+    else:
+        requirement = _prompt_requirement()
 
     if not requirement.strip():
         console.print("[red]Empty requirement.[/red]")

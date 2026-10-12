@@ -93,3 +93,12 @@ def try_invoke(kind: str, user: str, system: str, retries: int = 1) -> str | Non
         except Exception:
             return None
     return None
+
+
+def try_invoke_with_fallback(user: str, system: str) -> tuple[str | None, bool]:
+    """Heavy first, small on failure. Returns (text, fell_back)."""
+    text = try_invoke("heavy", user, system)
+    if text:
+        return text, False
+    text = try_invoke("small", user, system)
+    return text, text is not None

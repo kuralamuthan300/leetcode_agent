@@ -56,3 +56,22 @@ def test_evaluator_matrix_and_iterations(tmp_path, monkeypatch):
     assert out["eval"]["passed"] is False
     assert out["eval"]["passed_count"] == 1
     assert "t2" in out["eval"]["feedback"]
+    assert "5" in out["eval"]["feedback"] and "4" in out["eval"]["feedback"]
+
+
+def test_heavy_fallback_flag(monkeypatch):
+    import agent.prompts as prompts
+
+    calls = []
+
+    def fake(kind, user, system, retries=1):
+        calls.append(kind)
+        return None if kind == "heavy" else "1. do thing"
+
+    monkeypatch.setattr(prompts, "try_invoke", fake)
+    from agent.nodes import planner
+
+    out = planner({"clarified_intent": "sort an array of ints, return sorted"})
+    assert out["fallback_used"] is True
+    assert calls[0] == "heavy" and calls[-1] == "small"
+    assert out["plan_steps"]

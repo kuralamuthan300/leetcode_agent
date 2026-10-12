@@ -15,6 +15,7 @@ from .prompts import (
     extract_code,
     extract_json_array,
     try_invoke,
+    try_invoke_with_fallback,
 )
 
 MAX_INTENT_ITERATIONS = 3
@@ -82,9 +83,12 @@ def planner(state: dict) -> dict:
     user = f"Problem:\n{intent}"
     if feedback:
         user += f"\n\nPrevious attempt failed with this feedback — address it:\n{feedback[:1000]}"
-    text = try_invoke("heavy", user, PLANNER_SYSTEM)
+    text, fell_back = try_invoke_with_fallback(user, PLANNER_SYSTEM)
     if text:
-        return {"plan_steps": _parse_plan(text)}
+        out: dict = {"plan_steps": _parse_plan(text)}
+        if fell_back:
+            out["fallback_used"] = True
+        return out
     base = [f"Solve: {intent[:120]}"]
     if feedback:
         base.append(f"Address feedback: {feedback[:500]}")
@@ -143,7 +147,7 @@ def coder(state: dict) -> dict:
     if previous and not previous.strip().startswith("# TODO"):
         user += f"\n\nPrevious code to improve:\n{previous[:4000]}"
 
-    text = try_invoke("heavy", user, CODER_SYSTEM)
+    text, fell_back = try_invoke_with_fallback(user, CODER_SYSTEM)
     code = extract_code(text) if text else "# TODO: implement solution\n"
     smoke, report = _smoke(code)
 
@@ -152,12 +156,16 @@ def coder(state: dict) -> dict:
             f"Problem:\n{intent}\n\nFailing code:\n{code[:4000]}"
             f"\n\nSmoke error:\n{smoke['error'][:1000]}"
         )
-        fixed = try_invoke("heavy", repair_user, CODER_REPAIR_SYSTEM)
+        fixed, repair_fell_back = try_invoke_with_fallback(repair_user, CODER_REPAIR_SYSTEM)
+        fell_back = fell_back or repair_fell_back
         if fixed:
             code = extract_code(fixed)
             smoke, report = _smoke(code)
 
-    return {"code": code, "coder_smoke": smoke, "guardrail_report": report}
+    out: dict = {"code": code, "coder_smoke": smoke, "guardrail_report": report}
+    if fell_back:
+        out["fallback_used"] = True
+    return out
 
 
 def evaluator(state: dict) -> dict:
@@ -184,12 +192,17 @@ def evaluator(state: dict) -> dict:
     if not tests:
         ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated"}
     else:
-        failed = [r["test_id"] for r in results if not r["passed"]]
+        failed = [r for r in results if not r["passed"]]
+        details = "; ".join(
+            f"{r['test_id']}: expected {r['expected'][:200]!r} got {r['actual'][:200]!r}"
+            + (f" error {r['error'][:200]!r}" if r["error"] else "")
+            for r in failed[:5]
+        )
         ev = {
             "passed": passed_count == len(tests),
             "passed_count": passed_count,
             "total": len(tests),
-            "feedback": "" if not failed else f"failed tests: {', '.join(failed[:5])}",
+            "feedback": "" if not failed else f"failed {len(failed)}: {details}"[:2000],
         }
     return {"execution_results": results, "eval": ev, "iterations": iterations}
 
@@ -216,6 +229,7 @@ def run_reporter(state: dict) -> dict:
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),
         "guardrail_report": state.get("guardrail_report", {}),
+        "fallback_used": state.get("fallback_used", False),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
     }

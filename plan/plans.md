@@ -1,7 +1,7 @@
 # Execution Plan — LangGraph DSA Solver (steps 1–9)
 
 Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-13
-Progress: Steps 1–5 implemented on `task/step-1-5` (17 tests green).
+Progress: Steps 1–9 complete on `task/step-1-5` (18 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
 
 ## Step 1 — IntentClarifier LLM
 Replace heuristic-only with `deepseek-r1:1.5b` rewrite pass; keep max-3 self-loop
@@ -28,21 +28,21 @@ Verify: `PYTHONPATH=src uv run pytest tests/test_toolbox.py -q`.
 3. `guardrail_report` in state/output + blocked→retry wiring.
 Verify: `PYTHONPATH=src uv run pytest tests/test_guardrails.py -q` (malicious corpus blocked, legit DSA passes).
 
-## Step 6 — Evaluator matrix (heavy)
-Run code vs all tests via `run_python`; fill `execution_results`/`eval`;
-increment `iterations`; set `feedback` on fail.
-Verify: pass + fail-retry cases.
+## Step 6 — Evaluator matrix (heavy) [done]
+Runs each harness via gated `run_python`; `execution_results` with actual vs
+expected + error snippets in `feedback`; `iterations++`.
+Verify: pass + fail-retry cases (`tests/test_nodes.py`).
 
-## Step 7 — Resilience
-Timeouts (small 30–60s, heavy 120–180s); heavy→small fallback flag;
-parallel fan-out check.
-Verify: timeout test.
+## Step 7 — Resilience [done]
+Timeouts (small 90s, heavy 180s via Ollama client); heavy→small fallback with
+`fallback_used` flag in state/output (`try_invoke_with_fallback`, planner+coder);
+planner→[tests,coder] fan-out runs parallel in LangGraph.
+Verify: `test_heavy_fallback_flag`.
 
-## Step 8 — Golden E2E
-Two Sum, Valid Parentheses, Binary Search via CLI;
-`output/run_id_*.json` contains requirement/code/testcases.
-Verify: `PYTHONPATH=src uv run pytest -q` all green + 3 CLI runs.
+## Step 8 — Golden E2E [done]
+Two Sum ✅ 5/5, Valid Parentheses ✅ 5/5, Binary Search ✅ 5/5 via CLI
+(`--run-id` pinned); `output/run_id_*.json` contains requirement/code/testcases.
 
-## Step 9 — Finalize
-Update architecture status, clean `output/run_id_*.json` artifacts,
-confirm `git status` only shows intended files.
+## Step 9 — Finalize [done]
+Architecture status updated, `output/run_id_*.json` artifacts cleaned,
+`git status` shows only intended files, 18 tests green.

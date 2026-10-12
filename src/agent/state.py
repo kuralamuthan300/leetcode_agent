@@ -34,4 +34,5 @@ class AgentState(TypedDict, total=False):
     eval: EvalReport
     feedback: str
     iterations: int
+    fallback_used: bool
     output_path: str

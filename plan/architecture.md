@@ -1,7 +1,7 @@
 # Agent Architecture — LangGraph DSA Solver
 
 Branch: `task/step-1-5` | Updated: 2026-10-13
-Status: Steps 1-5 implemented (LLM nodes + guardrails); Step 6+ pending (see `plans.md`).
+Status: Steps 1–9 complete (18 tests green; 3 golden E2Es 5/5 live).
 
 ## Goal
 Terminal-driven LangGraph agent that solves data-structures & algorithms problems,
@@ -40,7 +40,7 @@ graph TD
 ## State (`src/agent/state.py`)
 `run_id, requirement, clarified_intent, intent_iterations, intent_clear,`
 `plan_steps, test_cases, code, coder_smoke{stdout,stderr,error},`
-`guardrail_report{allowed,reasons[],checked_at},`
+`guardrail_report{allowed,reasons[],checked_at}, fallback_used,`
 `execution_results (+add reducer), eval{passed,passed_count,total,feedback},`
 `feedback, iterations, output_path`.
 
@@ -56,15 +56,18 @@ graph TD
    contract, mandatory guardrail gate + smoke, one repair attempt on failure;
    emits `code`, `coder_smoke`, `guardrail_report`.
 5. Evaluator: runs each harness via gated `run_python`, compares stdout to
-   expected; emits `execution_results`, `eval`, `iterations`.
+   expected; emits `execution_results`, `eval` (failure details), `iterations`.
 6. RunReporter (deterministic, no LLM): consolidate + write JSON.
+
+Resilience: small 90s / heavy 180s client timeouts; heavy→small fallback sets
+`fallback_used` (planner, coder incl. repair); planner→[tests,coder] fan-out is parallel.
 
 ## CLI + Output
 - `PYTHONPATH=src uv run python -m cli --problem "..." | --file p.md | stdin`.
 - `run_id = run_id_YYYYMMDD_HHMMSS_<6hex>`, overridable via `--run-id`.
 - JSON schema: `run_id, timestamp, models{heavy,small}, requirement, clarified_intent,`
   `intent_iterations, intent_clear, plan_steps, test_cases, code, coder_smoke,`
-  `guardrail_report, execution_results, eval`.
+  `guardrail_report, fallback_used, execution_results, eval`.
 - Written by RunReporter to `output/<run_id>.json` (also on exhausted retries with `passed:false`).
 
 ## Guardrails

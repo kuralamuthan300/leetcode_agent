@@ -104,6 +104,39 @@ SQL_KEYWORDS = (
 PYTHON_HINTS = ("python", "def solve", "pip install")
 
 
+# Pure-DSA scope policy: only data-structures & algorithms coding tasks pass.
+DSA_MARKERS = (
+    "array", "linked list", "binary tree", "binary search", "graph",
+    "dynamic programming", "stack", "queue", "heap", "hash", "recursion",
+    "iterative", "matrix", "matrices", "palindrome", "anagram",
+    "sliding window", "two pointer", "bfs", "dfs", "backtracking", "greedy",
+    "divide and conquer", "big-o", "complexity", "nodes", "edges",
+    "indices", "leetcode", "sort", "search", "traverse", "traversal",
+)
+
+NONCODING_MARKERS = (
+    "essay", "poem", "story", "email", "letter", "resume", "cover letter",
+    "summarize", "summary", "translate", "weather", "news", "recipe",
+    "workout", "diet", "travel plans", "itinerary", "joke", "lyrics",
+    "blog post", "tweet", "caption", "grocery",
+)
+
+
+def check_scope(text: str) -> dict:
+    """Return {allowed: True | False | None, reason}.
+
+    True/False are heuristic fast paths; None means gray zone — caller
+    must ask the small-LLM classifier (fail-closed: LLM failure rejects).
+    """
+    t = text.strip().lower()
+    for marker in NONCODING_MARKERS:
+        if marker in t:
+            return {"allowed": False, "reason": f"not a DSA coding task ({marker})"}
+    for marker in DSA_MARKERS:
+        if marker in t:
+            return {"allowed": True, "reason": ""}
+    return {"allowed": None, "reason": "ambiguous scope"}
+
 def check_language(text: str) -> dict:
     """Return {allowed, reason}. Neutral DSA (no language cues) defaults to Python."""
     import re

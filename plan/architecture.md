@@ -45,11 +45,11 @@ graph TD
 `feedback, iterations, output_path`.
 
 ## Nodes (`src/agent/nodes.py`)
-1. IntentClarifier (small, self-loop max 3): Python-only gate first
-   (`check_language` — SQL/Java/etc → `rejected`, straight to reporter);
-   else LLM rewrite per iteration (escalating specificity), heuristic
-   `is_intent_clear()` score; emits `intent_iterations`, `intent_clear`;
-   router exits to Planner when clear or iters>=3.
+1. IntentClarifier (small, self-loop max 3): Python-only gate, then DSA-scope
+   gate (fast paths + small-LLM classifier, fail-closed) — rejects go straight
+   to reporter; else LLM rewrite per iteration (escalating specificity),
+   heuristic `is_intent_clear()` score; emits `intent_iterations`,
+   `intent_clear`; router exits to Planner when clear or iters>=3.
 2. Planner (heavy, small fallback): LLM algo + complexity + steps; consumes
    `feedback` on retry; heavy→small fallback, stub only if both fail.
 3. TestCaseGen (small): LLM JSON `[{id,harness,expected}]` (3-5, harness must

@@ -47,7 +47,8 @@ def is_intent_clear(text: str) -> bool:
 
 
 def intent_clarifier(state: dict) -> dict:
-    from .tools.guardrail import check_language
+    from .prompts import SCOPE_SYSTEM, try_invoke
+    from .tools.guardrail import check_language, check_scope
 
     n = state.get("intent_iterations", 0) + 1
     req = state.get("requirement", "").strip()
@@ -60,6 +61,26 @@ def intent_clarifier(state: dict) -> dict:
             "rejected": True,
             "rejection_reason": lang["reason"] + " — this agent solves in Python only",
         }
+    scope = check_scope(req)
+    if scope["allowed"] is False:
+        return {
+            "clarified_intent": req,
+            "intent_iterations": n,
+            "intent_clear": False,
+            "rejected": True,
+            "rejection_reason": scope["reason"] + " — this agent solves DSA coding tasks only",
+        }
+    if scope["allowed"] is None:
+        verdict = try_invoke("small", f"Request:\n{req}", SCOPE_SYSTEM)
+        if not verdict or not verdict.strip().upper().startswith("ALLOW"):
+            return {
+                "clarified_intent": req,
+                "intent_iterations": n,
+                "intent_clear": False,
+                "rejected": True,
+                "rejection_reason": (verdict or "scope unclear").strip()[:200]
+                + " — this agent solves DSA coding tasks only",
+            }
     prior = state.get("clarified_intent", "") or req
     if n == 1:
         user = f"Requirement:\n{req}"

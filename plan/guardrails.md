@@ -11,7 +11,20 @@ and sandbox escape via stdlib (`os`, `subprocess`, `socket`, `pathlib`, ...).
 ## Gate order
 `Coder code + harness -> guardrail.check() -> [blocked: return error JSON, no exec] / [allowed: run_python() in hard jail]`
 
-## 0. Python-only language gate (entry)
+## 0a. Python-only language gate (entry)
+`check_language()` runs first in IntentClarifier: explicit non-Python
+languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
+console.log, #include, …), or 2+ SQL keywords → `rejected: True`,
+straight to RunReporter, no LLM burn. Neutral DSA defaults to Python;
+explicit "python" always wins. Non-Python *code* is also backstopped by
+the AST gate (foreign syntax fails parse → blocked).
+
+## 0b. DSA-scope gate (entry, after language gate)
+`check_scope()` fast paths: DSA markers (array, linked list, binary search,
+dynamic programming, …) → allow; non-coding markers (essay, poem, summarize,
+weather, …) → `rejected`. Gray zone → one small-LLM verdict (`SCOPE_SYSTEM`);
+LLM failure rejects (fail-closed). Neutral-but-vague coding asks go to the
+classifier, never silently through.
 `check_language()` runs first in IntentClarifier: explicit non-Python
 languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
 console.log, #include, …), or 2+ SQL keywords → `rejected: True`,

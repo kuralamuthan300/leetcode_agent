@@ -54,6 +54,13 @@ CODER_REPAIR_SYSTEM = (
     "Reply with ONLY the corrected code."
 )
 
+SCOPE_SYSTEM = (
+    "You are a strict scope gate for a pure data-structures & algorithms "
+    "Python solver. Reply with exactly one line: ALLOW if the request is a "
+    "DSA coding task (arrays, strings, trees, graphs, sorting, searching, "
+    "dynamic programming, etc.), else REJECT: <short reason>. Be strict."
+)
+
 
 def strip_think(text: str) -> str:
     """Remove <think>...</think> reasoning traces (some models inline them)."""

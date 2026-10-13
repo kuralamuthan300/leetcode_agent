@@ -46,8 +46,12 @@ cat problem.md | PYTHONPATH=src uv run python -m cli
 PYTHONPATH=src uv run python -m cli --problem "..." --run-id run_id_demo
 ```
 
-Each run writes `output/<run_id>.json` with requirement, clarified intent,
+Each run streams one minimal status line per node (`✓ intent clear`, `✓ plan`,
+`✓ tests`, `✓ code`, `✓ eval 5/5`, `✓ wrote ...`, with `↻` retries and `⚠`
+blocks) and writes `output/<run_id>.json` with requirement, clarified intent,
 plan, test cases, code, sandbox results, eval report, and guardrail verdict.
+
+Add `--verbose` to also print the final code and tests.
 
 ## Test
 

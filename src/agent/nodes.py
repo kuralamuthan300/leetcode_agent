@@ -6,14 +6,18 @@ Every LLM call falls back to deterministic behavior so tests stay hermetic.
 from __future__ import annotations
 
 from . import prompts
+from .tools.guardrail import is_truncated
 from .prompts import (
     CODER_REPAIR_SYSTEM,
     CODER_SYSTEM,
     INTENT_SYSTEM,
     PLANNER_SYSTEM,
     TESTGEN_SYSTEM,
+    code_defines_signature,
     extract_code,
     extract_json_array,
+    extract_signature,
+    harness_matches,
     try_invoke,
     try_invoke_with_fallback,
 )
@@ -46,9 +50,52 @@ def is_intent_clear(text: str) -> bool:
     return any(k in t for k in _CLEAR_KEYWORDS)
 
 
-def intent_clarifier(state: dict) -> dict:
+def _missing_questions(req: str, text: str) -> list[str]:
+    low = f"{req}\n{text}".lower()
+    qs = []
+    if is_truncated(req):
+        tail = " ".join(req.strip().split()[-4:])
+        qs.append(f"Your request seems cut off after '{tail}' — what comes next?")
+    if "array" in low and not any(w in low for w in ("matrix", "matrices", "1-d", "2-d", "1d", "2d", "one-dimension", "two-dimension")):
+        qs.append("1-D array, matrix, or another structure?")
+    if "rotat" in low and not any(w in low for w in ("clockwise", "counter", "left", "right", " by ", " k")):
+        qs.append("Rotate by how much (k), and in which direction?")
+    if not any(w in low for w in ("input", "output", "return", "example")):
+        qs.append("What are the exact input and output formats (with an example)?")
+    if not any(w in low for w in ("constraint", "complexity", "o(n", "o(1", "limit")):
+        qs.append("Any constraints or required complexity?")
+    return qs[:3] or ["What are the constraints and an example?"]
+
+
+def _assumptions(text: str) -> list[str]:
+    return [ln.strip() for ln in text.splitlines() if ln.strip().lower().startswith("assumption")][:5]
+
+
+def _confirm_with_user(understanding: str, assumptions: list[str], questions: list[str]) -> tuple[str, bool]:
+    """Print understanding, ask inline. Returns (extra_info, confirmed)."""
+    print("\nMy understanding:")
+    print(understanding.strip()[:1500])
+    if assumptions:
+        print("\nAssumptions:")
+        for a in assumptions:
+            print(f"- {a[:200]}")
+    print("\nOpen questions:")
+    for i, q in enumerate(questions, 1):
+        print(f"{i}. {q}")
+    try:
+        answer = input("Confirm (Enter=yes) or type corrections: ")
+    except EOFError:
+        return "", False
+    if answer.strip().lower() in ("", "ok", "yes", "y", "looks good", "confirmed", "correct", "lgtm"):
+        return "", True
+    return answer, False
+
+
+def requirement_gatherer(state: dict) -> dict:
+    import sys
+
     from .prompts import SCOPE_SYSTEM, try_invoke
-    from .tools.guardrail import check_language, check_scope
+    from .tools.guardrail import check_language, check_scope, is_truncated
 
     n = state.get("intent_iterations", 0) + 1
     req = state.get("requirement", "").strip()
@@ -91,10 +138,31 @@ def intent_clarifier(state: dict) -> dict:
         )
     rewritten = try_invoke("small", user, INTENT_SYSTEM)
     text = rewritten if rewritten else prior
+
+    needs_confirmation = is_truncated(req) or not is_intent_clear(text)
+    confirmed, assumed = True, False
+    if needs_confirmation:
+        questions = _missing_questions(req, text)
+        if sys.stdin.isatty():
+            ok = False
+            for _ in range(2):
+                extra, ok = _confirm_with_user(text, _assumptions(text), questions)
+                if ok:
+                    break
+                req = f"{req}\nUser clarification: {extra.strip()}"
+                follow = try_invoke("small", f"Requirement:\n{req}", INTENT_SYSTEM)
+                text = follow if follow else text
+            confirmed = ok
+            assumed = not ok
+        else:
+            assumed = True
     return {
         "clarified_intent": text,
+        "requirement": req,
         "intent_iterations": n,
-        "intent_clear": is_intent_clear(text),
+        "intent_clear": is_intent_clear(text) and not assumed,
+        "confirmed": confirmed,
+        "assumed": assumed,
     }
 
 
@@ -103,6 +171,8 @@ def _parse_plan(text: str) -> list[str]:
 
     steps = []
     for line in text.splitlines():
+        if line.strip().upper().startswith("SIGNATURE:"):
+            continue
         line = re.sub(r"^[\s\-\*\d\.\)]+", "", line).strip()
         if line:
             steps.append(line)
@@ -118,6 +188,9 @@ def planner(state: dict) -> dict:
     text, fell_back = try_invoke_with_fallback(user, PLANNER_SYSTEM)
     if text:
         out: dict = {"plan_steps": _parse_plan(text)}
+        sig = extract_signature(text)
+        if sig:
+            out["function_signature"] = sig
         if fell_back:
             out["fallback_used"] = True
         return out
@@ -127,7 +200,7 @@ def planner(state: dict) -> dict:
     return {"plan_steps": base}
 
 
-def _valid_test(item: object) -> dict | None:
+def _valid_test(item: object, sig: str | None = None) -> dict | None:
     if not isinstance(item, dict):
         return None
     tid = str(item.get("id", "")).strip()
@@ -141,20 +214,25 @@ def _valid_test(item: object) -> dict | None:
 
     if not check("", harness)["allowed"]:
         return None
+    if sig and not harness_matches(harness, sig):
+        return None
     return {"id": tid, "harness": harness, "expected": expected.strip()}
 
 
 def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
+    sig = state.get("function_signature", "")
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
+    if sig:
+        user += f"\n\nCall the function exactly as contracted: {sig}"
     text = try_invoke("small", user, TESTGEN_SYSTEM)
     if not text:
         return {"test_cases": []}
     parsed = extract_json_array(text)
     if not parsed:
         return {"test_cases": []}
-    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item))]
+    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None))]
     return {"test_cases": tests}
 
 
@@ -168,12 +246,15 @@ def _smoke(code: str) -> tuple[dict, dict]:
 
 
 def coder(state: dict) -> dict:
-    """Generate code with heavy LLM, gate + smoke it, one repair attempt."""
+    """Generate code honoring the planner's signature, gate + smoke, repair once."""
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
+    sig = state.get("function_signature", "")
     feedback = state.get("feedback", "") or state.get("eval", {}).get("feedback", "")
     previous = state.get("code", "")
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
+    if sig:
+        user += f"\n\nYou MUST define exactly this function (same name and parameters): {sig}"
     if feedback:
         user += f"\n\nMust address this feedback:\n{feedback[:1000]}"
     if previous and not previous.strip().startswith("# TODO"):
@@ -181,6 +262,16 @@ def coder(state: dict) -> dict:
 
     text, fell_back = try_invoke_with_fallback(user, CODER_SYSTEM)
     code = extract_code(text) if text else "# TODO: implement solution\n"
+
+    if sig and text and not code_defines_signature(code, sig):
+        correction = (
+            f"Problem:\n{intent}\n\nYour code must define exactly: {sig}\n"
+            f"Failing code:\n{code[:4000]}"
+        )
+        fixed, repair_fell_back = try_invoke_with_fallback(correction, CODER_REPAIR_SYSTEM)
+        fell_back = fell_back or repair_fell_back
+        if fixed:
+            code = extract_code(fixed)
     smoke, report = _smoke(code)
 
     if smoke["error"] and not smoke["error"].startswith("blocked:") and text:
@@ -258,7 +349,10 @@ def run_reporter(state: dict) -> dict:
         "clarified_intent": state.get("clarified_intent", ""),
         "intent_iterations": state.get("intent_iterations", 0),
         "intent_clear": state.get("intent_clear", False),
+        "confirmed": state.get("confirmed", False),
+        "assumed": state.get("assumed", False),
         "plan_steps": state.get("plan_steps", []),
+        "function_signature": state.get("function_signature", ""),
         "test_cases": state.get("test_cases", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),

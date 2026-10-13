@@ -29,6 +29,8 @@ PLANNER_SYSTEM = (
     "You plan solutions to DSA problems. Given a clarified problem (and optional "
     "feedback from a failed attempt), output a short plan: one approach, its "
     "time/space complexity, then numbered implementation steps. "
+    "End your reply with a line giving the exact Python function contract, e.g. "
+    "SIGNATURE: def solve(arr, k). "
     "Reply with ONLY the plan, one item per line."
 )
 
@@ -109,3 +111,55 @@ def try_invoke_with_fallback(user: str, system: str) -> tuple[str | None, bool]:
         return text, False
     text = try_invoke("small", user, system)
     return text, text is not None
+
+
+def extract_signature(text: str) -> str | None:
+    """Pull `SIGNATURE: def solve(...)` contract line; None if absent/invalid."""
+    m = re.search(r"^SIGNATURE:\s*(def\s+solve\s*\(.*?\))\s*$", text, flags=re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def _def_args(code: str, name: str) -> list[str] | None:
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return [a.arg for a in node.args.args]
+    return None
+
+
+def signature_params(sig: str) -> list[str] | None:
+    """Param names of a `def ...` signature line; None if unparseable."""
+    try:
+        return _def_args(sig + ":\n    pass", "solve")
+    except Exception:
+        return None
+
+
+def code_defines_signature(code: str, sig: str) -> bool:
+    want = signature_params(sig)
+    got = _def_args(code, "solve")
+    return want is not None and got == want
+
+
+def harness_matches(harness: str, sig: str) -> bool:
+    """Harness must call solve() with the contracted arity."""
+    import ast
+
+    want = signature_params(sig)
+    if want is None:
+        return True
+    try:
+        tree = ast.parse(harness)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "solve":
+            given = len(node.args) + len(node.keywords)
+            if given == len(want):
+                return True
+    return False

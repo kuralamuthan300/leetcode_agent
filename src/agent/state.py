@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from operator import add
-from typing import Annotated, Any, TypedDict
-
+from typing import Any, TypedDict
 
 class ExecutionResult(TypedDict):
     test_id: str
@@ -25,12 +23,15 @@ class AgentState(TypedDict, total=False):
     clarified_intent: str
     intent_iterations: int
     intent_clear: bool
+    confirmed: bool
+    assumed: bool
     plan_steps: list[str]
+    function_signature: str
     test_cases: list[dict[str, Any]]
     code: str
     coder_smoke: dict[str, str]
     guardrail_report: dict
-    execution_results: Annotated[list[ExecutionResult], add]
+    execution_results: list[ExecutionResult]  # replace semantics: latest run only
     eval: EvalReport
     feedback: str
     iterations: int

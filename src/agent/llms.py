@@ -5,7 +5,7 @@ import os
 from langchain_ollama import ChatOllama
 
 HEAVY_MODEL = os.getenv("OLLAMA_HEAVY", "gemma4:31b-cloud")
-SMALL_MODEL = os.getenv("OLLAMA_SMALL", "gpt-oss:20b-cloud")
+SMALL_MODEL = os.getenv("OLLAMA_SMALL", "gemma4:31b-cloud")
 BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Wall-clock guardrails for inference (Step 7 tunes these).

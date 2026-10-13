@@ -34,24 +34,24 @@ def test_gray_allow_via_llm(monkeypatch):
     import agent.prompts as prompts
 
     monkeypatch.setattr(prompts, "try_invoke", lambda *a, **k: "ALLOW")
-    from agent.nodes import intent_clarifier
+    from agent.nodes import requirement_gatherer
 
-    out = intent_clarifier({"requirement": "Add two numbers and return the result please."})
+    out = requirement_gatherer({"requirement": "Add two numbers and return the result please."})
     assert out.get("rejected") is not True
 
 
 def test_gray_reject_and_offline_fail_closed(monkeypatch):
     import agent.prompts as prompts
 
-    from agent.nodes import intent_clarifier
+    from agent.nodes import requirement_gatherer
 
     monkeypatch.setattr(prompts, "try_invoke", lambda *a, **k: "REJECT: not a coding task")
-    out = intent_clarifier({"requirement": "Add two numbers and return the result please."})
+    out = requirement_gatherer({"requirement": "Add two numbers and return the result please."})
     assert out["rejected"] is True
     assert "DSA coding tasks only" in out["rejection_reason"]
 
     monkeypatch.setattr(prompts, "try_invoke", lambda *a, **k: None)
-    out = intent_clarifier({"requirement": "Add two numbers and return the result please."})
+    out = requirement_gatherer({"requirement": "Add two numbers and return the result please."})
     assert out["rejected"] is True
 
 

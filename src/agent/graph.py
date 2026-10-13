@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
-from .nodes import MAX_INTENT_ITERATIONS, coder, evaluator, intent_clarifier, planner, run_reporter, test_case_gen
+from .nodes import MAX_INTENT_ITERATIONS, coder, evaluator, planner, requirement_gatherer, run_reporter, test_case_gen
 from .state import AgentState
 
 MAX_ITERATIONS = 3
 
 
-def _route_intent(state: AgentState) -> str:
+def _route_gather(state: AgentState) -> str:
     if state.get("rejected"):
         return "reporter"
-    if state.get("intent_clear"):
+    if state.get("intent_clear") or state.get("assumed"):
         return "planner"
     if state.get("intent_iterations", 0) >= MAX_INTENT_ITERATIONS:
         return "planner"
-    return "intent"
+    return "gather"
 
 
 def _route_eval(state: AgentState) -> str:
@@ -29,16 +29,16 @@ def _route_eval(state: AgentState) -> str:
 
 def build_graph():
     g = StateGraph(AgentState)
-    g.add_node("intent", intent_clarifier)
+    g.add_node("gather", requirement_gatherer)
     g.add_node("planner", planner)
     g.add_node("tests", test_case_gen)
     g.add_node("coder", coder)
     g.add_node("evaluator", evaluator)
     g.add_node("reporter", run_reporter)
-    g.set_entry_point("intent")
+    g.set_entry_point("gather")
     g.add_conditional_edges(
-        "intent", _route_intent,
-        {"intent": "intent", "planner": "planner", "reporter": "reporter"},
+        "gather", _route_gather,
+        {"gather": "gather", "planner": "planner", "reporter": "reporter"},
     )
     g.add_edge("planner", "tests")
     g.add_edge("planner", "coder")

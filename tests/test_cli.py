@@ -51,8 +51,8 @@ def test_main_empty_requirement_rejected(tmp_path, monkeypatch, capsys):
 def test_status_lines():
     import cli
 
-    assert cli._line("intent", {"intent_clear": True, "intent_iterations": 1}) == "✓ intent clear (1 iter)"
-    assert "retrying (1/3)" in cli._line("intent", {"intent_clear": False, "intent_iterations": 1})
+    assert cli._line("gather", {"intent_clear": True, "intent_iterations": 1}) == "✓ requirements clear (1 iter)"
+    assert "retrying (1/3)" in cli._line("gather", {"intent_clear": False, "intent_iterations": 1})
     assert cli._line("planner", {"plan_steps": ["a", "b"]}) == "✓ plan (2 steps)"
     assert cli._line("tests", {"test_cases": [{}, {}]}) == "✓ tests (2)"
     assert cli._line("coder", {"coder_smoke": {"error": ""}}) == "✓ code (smoke ok)"
@@ -74,3 +74,9 @@ def test_run_graph_accumulates():
     final = cli._run_graph(FakeGraph(), {"run_id": "r", "requirement": "q"})
     assert final["output_path"] == "output/y.json"
     assert final["intent_clear"] is True
+
+
+def test_gather_lines():
+    import cli
+
+    assert "(assumed)" in cli._line("gather", {"intent_clear": False, "intent_iterations": 1, "assumed": True})

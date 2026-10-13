@@ -39,13 +39,15 @@ def _prompt_requirement() -> str:
 def _line(node: str, patch: dict) -> str:
     """One minimal status line per node update."""
     tag = " (fallback)" if patch.get("fallback_used") else ""
-    if node == "intent":
+    if patch.get("assumed"):
+        tag += " (assumed)"
+    if node == "gather":
         if patch.get("rejected"):
             return f"⛔ rejected: {patch.get('rejection_reason', '')[:100]}"
         n = patch.get("intent_iterations", "?")
         if patch.get("intent_clear"):
-            return f"✓ intent clear ({n} iter){tag}"
-        return f"↻ intent unclear, retrying ({n}/3){tag}"
+            return f"✓ requirements clear ({n} iter){tag}"
+        return f"↻ requirements unclear, retrying ({n}/3){tag}"
     if node == "planner":
         return f"✓ plan ({len(patch.get('plan_steps', []))} steps){tag}"
     if node == "tests":

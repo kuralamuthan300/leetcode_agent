@@ -137,6 +137,25 @@ def check_scope(text: str) -> dict:
             return {"allowed": True, "reason": ""}
     return {"allowed": None, "reason": "ambiguous scope"}
 
+
+TRUNCATION_TAILS = frozenset(
+    {"of", "in", "by", "to", "with", "for", "on", "at", "from", "as", "and", "or", "a", "an", "the"}
+)
+
+
+def is_truncated(text: str) -> bool:
+    """Detect cut-off input: ends mid-phrase (preposition/article) or dangling comma."""
+    import re
+    import string
+
+    s = text.strip()
+    if not s:
+        return True
+    if s[-1] in ",;:" or s.endswith("..."):
+        return True
+    last = re.split(r"\s+", s)[-1].strip(string.punctuation).lower()
+    return last in TRUNCATION_TAILS
+
 def check_language(text: str) -> dict:
     """Return {allowed, reason}. Neutral DSA (no language cues) defaults to Python."""
     import re

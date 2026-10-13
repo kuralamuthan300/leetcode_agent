@@ -1,7 +1,7 @@
 # Agent Architecture — LangGraph DSA Solver
 
 Branch: `task/step-1-5` | Updated: 2026-10-13
-Status: Steps 1–9 complete (18 tests green; 3 golden E2Es 5/5 live).
+Status: Steps 1–9 complete (22 tests green; 3 golden E2Es 5/5 live) + interactive CLI prompt.
 
 ## Goal
 Terminal-driven LangGraph agent that solves data-structures & algorithms problems,
@@ -48,13 +48,13 @@ graph TD
 1. IntentClarifier (small, self-loop max 3): LLM rewrite per iteration
    (escalating specificity), heuristic `is_intent_clear()` score; emits
    `intent_iterations`, `intent_clear`; router exits to Planner when clear or iters>=3.
-2. Planner (heavy): LLM algo + complexity + steps; consumes `feedback` on retry;
-   deterministic stub fallback.
+2. Planner (heavy, small fallback): LLM algo + complexity + steps; consumes
+   `feedback` on retry; heavy→small fallback, stub only if both fail.
 3. TestCaseGen (small): LLM JSON `[{id,harness,expected}]` (3-5, harness must
    `print(solve(...))`); validated + guardrail-screened; `[]` fallback.
-4. Coder (heavy + `python_sandbox` tool): LLM code honoring the `solve`
-   contract, mandatory guardrail gate + smoke, one repair attempt on failure;
-   emits `code`, `coder_smoke`, `guardrail_report`.
+4. Coder (heavy, small fallback + `python_sandbox` tool): LLM code honoring
+   the `solve` contract, mandatory guardrail gate + smoke, one repair attempt
+   on failure; emits `code`, `coder_smoke`, `guardrail_report`.
 5. Evaluator: runs each harness via gated `run_python`, compares stdout to
    expected; emits `execution_results`, `eval` (failure details), `iterations`.
 6. RunReporter (deterministic, no LLM): consolidate + write JSON.
@@ -77,7 +77,7 @@ fail-closed). Implementation: `src/agent/tools/guardrail.py` + `tests/test_guard
 
 ## Project setup (uv)
 - `pyproject.toml`: `langgraph, langchain-ollama, langchain-core, pydantic, rich`; dev `pytest, ruff`.
-- Layout: `src/agent/{state,llms,nodes,graph,tools/sandbox,tools/guardrail}.py`, `src/cli.py`,
-  `tests/{test_graph,test_sandbox,test_intent,test_toolbox,test_guardrails}.py`, `output/.gitkeep`, `plan/`.
-- Verify: `uv sync`, `PYTHONPATH=src uv run pytest -q` (7 passed),
+- Layout: `src/agent/{state,llms,nodes,prompts,graph,tools/sandbox,tools/guardrail}.py`, `src/cli.py`,
+  `tests/{test_graph,test_sandbox,test_intent,test_toolbox,test_guardrails,test_nodes,test_cli}.py`, `output/.gitkeep`, `plan/`.
+- Verify: `uv sync`, `PYTHONPATH=src uv run pytest -q` (22 passed),
   `PYTHONPATH=src uv run python -m cli --problem "two sum..."`.

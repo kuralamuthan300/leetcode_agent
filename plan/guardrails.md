@@ -11,6 +11,14 @@ and sandbox escape via stdlib (`os`, `subprocess`, `socket`, `pathlib`, ...).
 ## Gate order
 `Coder code + harness -> guardrail.check() -> [blocked: return error JSON, no exec] / [allowed: run_python() in hard jail]`
 
+## 0. Python-only language gate (entry)
+`check_language()` runs first in IntentClarifier: explicit non-Python
+languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
+console.log, #include, …), or 2+ SQL keywords → `rejected: True`,
+straight to RunReporter, no LLM burn. Neutral DSA defaults to Python;
+explicit "python" always wins. Non-Python *code* is also backstopped by
+the AST gate (foreign syntax fails parse → blocked).
+
 ## 1. Static gate (`src/agent/tools/guardrail.py::check`)
 - Parse both `code` and `harness` with `ast`.
 - Imports: deny all except allowlist (`math`, `typing`, `collections`,

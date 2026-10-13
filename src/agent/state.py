@@ -35,4 +35,6 @@ class AgentState(TypedDict, total=False):
     feedback: str
     iterations: int
     fallback_used: bool
+    rejected: bool
+    rejection_reason: str
     output_path: str

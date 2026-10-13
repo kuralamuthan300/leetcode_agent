@@ -47,8 +47,19 @@ def is_intent_clear(text: str) -> bool:
 
 
 def intent_clarifier(state: dict) -> dict:
+    from .tools.guardrail import check_language
+
     n = state.get("intent_iterations", 0) + 1
     req = state.get("requirement", "").strip()
+    lang = check_language(req)
+    if not lang["allowed"]:
+        return {
+            "clarified_intent": req,
+            "intent_iterations": n,
+            "intent_clear": False,
+            "rejected": True,
+            "rejection_reason": lang["reason"] + " — this agent solves in Python only",
+        }
     prior = state.get("clarified_intent", "") or req
     if n == 1:
         user = f"Requirement:\n{req}"
@@ -221,6 +232,8 @@ def run_reporter(state: dict) -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "models": {"heavy": HEAVY_MODEL, "small": SMALL_MODEL},
         "requirement": state.get("requirement", ""),
+        "rejected": state.get("rejected", False),
+        "rejection_reason": state.get("rejection_reason", ""),
         "clarified_intent": state.get("clarified_intent", ""),
         "intent_iterations": state.get("intent_iterations", 0),
         "intent_clear": state.get("intent_clear", False),

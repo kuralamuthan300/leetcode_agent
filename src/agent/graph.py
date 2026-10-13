@@ -9,6 +9,8 @@ MAX_ITERATIONS = 3
 
 
 def _route_intent(state: AgentState) -> str:
+    if state.get("rejected"):
+        return "reporter"
     if state.get("intent_clear"):
         return "planner"
     if state.get("intent_iterations", 0) >= MAX_INTENT_ITERATIONS:
@@ -34,7 +36,10 @@ def build_graph():
     g.add_node("evaluator", evaluator)
     g.add_node("reporter", run_reporter)
     g.set_entry_point("intent")
-    g.add_conditional_edges("intent", _route_intent, {"intent": "intent", "planner": "planner"})
+    g.add_conditional_edges(
+        "intent", _route_intent,
+        {"intent": "intent", "planner": "planner", "reporter": "reporter"},
+    )
     g.add_edge("planner", "tests")
     g.add_edge("planner", "coder")
     g.add_edge("tests", "evaluator")

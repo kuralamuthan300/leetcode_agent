@@ -16,8 +16,7 @@ IMPORT_ALLOW = frozenset(
     {"math", "typing", "collections", "itertools", "functools", "heapq", "bisect"}
 )
 
-DENY_NAMES = frozenset(
-    {
+DENY_NAMES = frozenset(    {
         # file / IO
         "open", "file", "input",
         # dynamic exec / import escapes
@@ -83,3 +82,44 @@ def report(code: str, harness: str = "") -> dict:
     result = check(code, harness)
     result["checked_at"] = datetime.now(timezone.utc).isoformat()
     return result
+
+
+# Strict Python-only policy: any other requested language is rejected.
+EXPLICIT_LANGS = (
+    "java", "javascript", "typescript", "sql", "golang", "rust", "kotlin",
+    "swift", "scala", "php", "ruby",
+)
+# single strong markers of non-Python code
+STRONG_MARKERS = (
+    "public class", "public static void", "system.out", "jdbc",
+    "console.log", "#include", "using namespace", "func main(",
+    "fn main(", "c++", "c#",
+)
+# sql-ish keywords: needs 2+ distinct hits (each alone is common English)
+SQL_KEYWORDS = (
+    "select", "join", "group by", "order by", "insert into", "delete from",
+    "create table", "drop table", "alter table", "union", "having",
+)
+
+PYTHON_HINTS = ("python", "def solve", "pip install")
+
+
+def check_language(text: str) -> dict:
+    """Return {allowed, reason}. Neutral DSA (no language cues) defaults to Python."""
+    import re
+
+    t = text.strip().lower()
+    if any(h in t for h in PYTHON_HINTS):
+        return {"allowed": True, "reason": ""}
+    for lang in EXPLICIT_LANGS:
+        if re.search(r"\b" + re.escape(lang) + r"\b", t):
+            return {"allowed": False, "reason": f"non-Python language requested ({lang})"}
+    if re.search(r"\b(in|using|with)\s+go\b", t):
+        return {"allowed": False, "reason": "non-Python language requested (go)"}
+    for marker in STRONG_MARKERS:
+        if marker in t:
+            return {"allowed": False, "reason": f"non-Python code requested ({marker})"}
+    hits = [k for k in SQL_KEYWORDS if k in t]
+    if len(hits) >= 2:
+        return {"allowed": False, "reason": f"SQL query requested ({', '.join(hits[:3])})"}
+    return {"allowed": True, "reason": ""}

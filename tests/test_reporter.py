@@ -16,6 +16,8 @@ def test_reporter_schema_complete(tmp_path, monkeypatch):
         "assumed": False,
         "plan_steps": ["p"],
         "function_signature": "def solve(a)",
+        "arg_spec": [{"name": "a", "type": "int", "range": "0..10"}],
+        "returns_spec": "int",
         "test_cases": [{"id": "t", "harness": "print(solve(1))", "expected": "1"}],
         "code": "def solve(a):\n    return a\n",
         "coder_smoke": {"error": ""},

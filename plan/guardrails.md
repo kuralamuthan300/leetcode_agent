@@ -19,8 +19,7 @@ straight to RunReporter, no LLM burn. Neutral DSA defaults to Python;
 explicit "python" always wins. Non-Python *code* is also backstopped by
 the AST gate (foreign syntax fails parse → blocked).
 
-## 0b. DSA-scope gate (entry, after language gate)
-`check_scope()` fast paths: DSA markers (array, linked list, binary search,
+## 0b. DSA-scope gate (entry, after language gate)`check_scope()` fast paths: DSA markers (array, linked list, binary search,
 dynamic programming, …) → allow; non-coding markers (essay, poem, summarize,
 weather, …) → `rejected`. Gray zone → one small-LLM verdict (`SCOPE_SYSTEM`);
 LLM failure rejects (fail-closed). Neutral-but-vague coding asks go to the
@@ -77,3 +76,9 @@ the AST gate (foreign syntax fails parse → blocked).
 2. Harden `run_python` builtins/importer/limits.
 3. `guardrail_report` in state/output + retry wiring.
 4. Corpus tests green; container isolation later.
+
+## Contract as truth (adjudication)
+The planner's `CONTRACT` (signature + arg ranges) is the source of truth when
+code and tests disagree: harness arity/range violations blame the test
+deterministically and can never trigger code repair. See
+`plan/contract_adjudication.md`.

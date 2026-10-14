@@ -22,7 +22,7 @@ graph TD
     RequirementGatherer -.->|vague, confirms| RequirementGatherer
     RequirementGatherer -->|confirmed / assumed| Planner
     RequirementGatherer -.->|rejected: wrong language / non-DSA| RunReporter
-    Planner -->|plan + SIGNATURE + plan-critic| Coder
+    Planner -->|plan + CONTRACT + plan-critic| Coder
     Coder -.->|gate + smoke-call + code-critic| PythonSandbox
     Coder --> TestCaseGen
     TestCaseGen -->|tests + test-critic| Evaluator
@@ -40,7 +40,8 @@ graph TD
 
 ## State (`src/agent/state.py`)
 `run_id, requirement, clarified_intent, intent_iterations, intent_clear,`
-`confirmed, assumed, session_notes, plan_steps, function_signature, test_cases, code,`
+`confirmed, assumed, session_notes, plan_steps, function_signature, arg_spec,`
+`returns_spec, test_cases, code,`
 `coder_smoke{stdout,stderr,error}, guardrail_report{allowed,reasons[],checked_at},`
 `fallback_used, critic_overruled, execution_results (replace semantics),`
 `eval{passed,passed_count,total,feedback,error_class}, feedback, iterations, output_path`.
@@ -52,19 +53,22 @@ graph TD
    correction rounds); per-session memory (`session.py`, `/tmp` file,
    `--fresh` resets, ignored off-TTY); non-TTY proceeds `assumed`.
    Emits `clarified_intent`, `confirmed`/`assumed`, `session_notes`.
-2. Planner (heavy, small fallback): LLM plan + `SIGNATURE: def solve(...)`
-   contract; consumes `feedback` on retry; stub if both models fail.
+2. Planner (heavy, small fallback): LLM plan + fenced JSON `CONTRACT`
+   (signature + typed args/ranges + returns; legacy `SIGNATURE:` accepted);
+   consumes `feedback` on retry; stub if both models fail.
 3. TestCaseGen (small): LLM JSON `[{id,harness,expected}]` (3-5, harness must
-   `print(solve(...))` with contracted arity); validated + guardrail-screened;
-   `[]` fallback.
+   `print(solve(...))` with contracted arity and in-range values, boundary
+   coverage); validated + guardrail-screened; `[]` fallback.
 4. Coder (heavy, small fallback + `python_sandbox` tool): LLM code honoring the
    planner's `function_signature` (AST-validated, repair on mismatch),
    mandatory guardrail gate + import smoke + `solve()` call-smoke (fails only
    on NameError/ImportError); bounded repairs (sig-fix or smoke-fix, then one
    critic regen); emits `code`, `coder_smoke`, `guardrail_report`.
 5. Evaluator: runs each harness via gated `run_python`, compares stdout to
-   expected; emits `execution_results` (replace semantics — latest run only),
-   `eval` (failure details), `iterations`.
+   expected; adjudicates failures (`adjudicate()`: contract violations ⇒ test,
+   else small-model verdict) with per-result `blame`; repairs blame=test cases
+   in place (`repair_test()`, escalates on flip-flop); emits `execution_results`
+   (replace semantics — latest run only), `eval` (failure details), `iterations`.
 6. RunReporter (deterministic, no LLM): consolidate + write JSON.
 
 Resilience: small 90s / heavy 180s client timeouts; heavy→small fallback sets
@@ -80,7 +84,8 @@ regen each; `critic_overruled` set when proceeding with open issues.
 - Live status: one line per node via `graph.stream` (`✓` done, `↻` retry, `⚠` blocked, `⛔` rejected, `(fallback)`/`(assumed)` tags).
 - JSON schema: `run_id, timestamp, models{heavy,small}, requirement, rejected,`
   `rejection_reason, clarified_intent, intent_iterations, intent_clear,`
-  `confirmed, assumed, session_notes, plan_steps, function_signature, test_cases, code,`
+  `confirmed, assumed, session_notes, plan_steps, function_signature, arg_spec,`
+  `returns_spec, test_cases, code,`
   `coder_smoke, guardrail_report, fallback_used, critic_overruled, execution_results, eval`.
 - Written by RunReporter to `output/<run_id>.json` (also on exhausted retries with `passed:false`).
 

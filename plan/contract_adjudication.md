@@ -34,10 +34,10 @@ eval failures adjudicate TEST_WRONG vs CODE_WRONG with targeted repair.
   keeps the original failure. CODE_WRONG flows via existing feedback.
 - `repaired: bool` per result; 3-iteration budget unchanged.
 
-## Step 6 — State, reporter, docs, E2E
-- State: `arg_spec`; reporter JSON includes it (+ `blame` per result).
-- Docs: `plan/architecture.md` (Nodes §2/§3/§5, state, schema), `plan/plans.md`
-  new step, `plan/guardrails.md` contract-as-truth note.
+## Step 6 — State, reporter, docs, E2E [done]
+- State + reporter JSON: `arg_spec`, `returns_spec` (+ `blame`/`repaired` per result).
+- Docs: `plan/architecture.md` (Nodes §2/§3/§5, state, schema, diagram),
+  `plan/guardrails.md` contract-as-truth note.
 - Full suite green + Two Sum golden E2E showing an adjudicated run.
 
 Verify each step: hermetic unit tests first, then live E2E.

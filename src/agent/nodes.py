@@ -555,6 +555,8 @@ def run_reporter(state: dict) -> dict:
         "assumed": state.get("assumed", False),
         "plan_steps": state.get("plan_steps", []),
         "function_signature": state.get("function_signature", ""),
+        "arg_spec": state.get("arg_spec", []),
+        "returns_spec": state.get("returns_spec", ""),
         "test_cases": state.get("test_cases", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),

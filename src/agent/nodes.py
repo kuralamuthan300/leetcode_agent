@@ -16,8 +16,8 @@ from .prompts import (
     code_defines_signature,
     critique,
     extract_code,
+    extract_contract,
     extract_json_array,
-    extract_signature,
     harness_matches,
     try_invoke,
     try_invoke_with_fallback,
@@ -188,10 +188,17 @@ def _parse_plan(text: str) -> list[str]:
     import re
 
     steps = []
-    for line in text.splitlines():
-        if line.strip().upper().startswith("SIGNATURE:"):
+    in_fence = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
             continue
-        line = re.sub(r"^[\s\-\*\d\.\)]+", "", line).strip()
+        if in_fence or s.upper().startswith("CONTRACT:") or s.upper().startswith("SIGNATURE:"):
+            continue
+        if s.startswith(("{", "}", '"')):
+            continue
+        line = re.sub(r"^[\s\-\*\d\.\)]+", "", raw).strip()
         if line:
             steps.append(line)
     return steps[:10] or [text.strip()[:500]]
@@ -221,9 +228,10 @@ def planner(state: dict) -> dict:
         else:
             overruled = True
     out: dict = {"plan_steps": _parse_plan(text)}
-    sig = extract_signature(text)
-    if sig:
-        out["function_signature"] = sig
+    contract = extract_contract(text)
+    if contract:
+        out["function_signature"] = contract["signature"]
+        out["arg_spec"] = contract["args"]
     if fell_back:
         out["fallback_used"] = True
     if overruled:

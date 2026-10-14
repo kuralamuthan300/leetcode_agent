@@ -29,9 +29,16 @@ PLANNER_SYSTEM = (
     "You plan solutions to DSA problems. Given a clarified problem (and optional "
     "feedback from a failed attempt), output a short plan: one approach, its "
     "time/space complexity, then numbered implementation steps. "
-    "End your reply with a line giving the exact Python function contract, e.g. "
-    "SIGNATURE: def solve(arr, k). "
-    "Reply with ONLY the plan, one item per line."
+    "End your reply with a fenced JSON contract block describing inputs. "
+    "The contracted function MUST be named `solve`, e.g.\n"
+    "CONTRACT:\n"
+    "```json\n"
+    '{"signature": "def solve(arr, k)", '
+    '"args": [{"name": "arr", "type": "List[int]", "range": "len 1..100000, values -1000000000..1000000000"}, '
+    '{"name": "k", "type": "int", "range": "0..1000000000"}], '
+    '"returns": "List[int]"}\n'
+    "```\n"
+    "Reply with ONLY the plan lines plus the contract block."
 )
 
 TESTGEN_SYSTEM = (
@@ -72,7 +79,8 @@ CRITIC_SYSTEM = (
 PLAN_CHECKLIST = (
     "1. States one approach. 2. States time/space complexity. "
     "3. Has numbered implementation steps. "
-    "4. Ends with a SIGNATURE: def solve(...) contract line."
+    "4. Ends with a CONTRACT json block whose signature is def solve(...) "
+    "with typed args and ranges."
 )
 
 CODE_CHECKLIST = (
@@ -164,6 +172,34 @@ def extract_signature(text: str) -> str | None:
     """Pull `SIGNATURE: def solve(...)` contract line; None if absent/invalid."""
     m = re.search(r"^SIGNATURE:\s*(def\s+solve\s*\(.*?\))\s*$", text, flags=re.MULTILINE)
     return m.group(1).strip() if m else None
+
+
+def extract_contract(text: str) -> dict | None:
+    """Pull fenced JSON CONTRACT block; else legacy SIGNATURE line; else None.
+
+    Returns {"signature": str, "args": [...], "returns": str} with args
+    normalized to [{name, type, range}]. Legacy path yields empty args.
+    """
+    for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        sig = data.get("signature", "")
+        if isinstance(sig, str) and re.match(r"def\s+solve\s*\(.*\)", sig.strip()):
+            args = []
+            for a in data.get("args", []) or []:
+                if isinstance(a, dict) and a.get("name"):
+                    args.append({
+                        "name": str(a["name"]),
+                        "type": str(a.get("type", "")),
+                        "range": str(a.get("range", "")),
+                    })
+            return {"signature": sig.strip(), "args": args, "returns": str(data.get("returns", ""))}
+    sig = extract_signature(text)
+    if sig:
+        return {"signature": sig, "args": [], "returns": ""}
+    return None
 
 
 def _def_args(code: str, name: str) -> list[str] | None:

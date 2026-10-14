@@ -28,6 +28,7 @@ class AgentState(TypedDict, total=False):
     assumed: bool
     plan_steps: list[str]
     function_signature: str
+    arg_spec: list[dict[str, str]]
     test_cases: list[dict[str, Any]]
     code: str
     coder_smoke: dict[str, str]

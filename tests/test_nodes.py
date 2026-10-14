@@ -63,6 +63,7 @@ def test_evaluator_matrix_and_iterations(tmp_path, monkeypatch):
 def test_signature_helpers():
     from agent.prompts import (
         code_defines_signature,
+        extract_contract,
         extract_signature,
         harness_matches,
         signature_params,
@@ -75,6 +76,52 @@ def test_signature_helpers():
     assert code_defines_signature("def solve(n, arr, k):\n    return arr", "def solve(arr, k)") is False
     assert harness_matches("print(solve([1], 2))", "def solve(arr, k)") is True
     assert harness_matches("print(solve([1]))", "def solve(arr, k)") is False
+
+
+def test_extract_contract_block_legacy_absent():
+    from agent.prompts import extract_contract
+
+    block = (
+        "1. Hash map\n"
+        "CONTRACT:\n"
+        "```json\n"
+        '{"signature": "def solve(arr, k)", '
+        '"args": [{"name": "arr", "type": "List[int]", "range": "len 1..5"}, '
+        '{"name": "k", "type": "int", "range": "0..10"}], '
+        '"returns": "List[int]"}\n'
+        "```\n"
+    )
+    c = extract_contract(block)
+    assert c is not None
+    assert c["signature"] == "def solve(arr, k)"
+    assert c["args"] == [
+        {"name": "arr", "type": "List[int]", "range": "len 1..5"},
+        {"name": "k", "type": "int", "range": "0..10"},
+    ]
+    assert c["returns"] == "List[int]"
+
+    legacy = extract_contract("plan stuff\nSIGNATURE: def solve(a, b)")
+    assert legacy == {"signature": "def solve(a, b)", "args": [], "returns": ""}
+
+    assert extract_contract("just prose, no contract") is None
+
+
+def test_planner_stores_contract(monkeypatch):
+    import agent.nodes as nodes
+
+    plan_text = (
+        "1. Use a hash map\n"
+        "CONTRACT:\n"
+        "```json\n"
+        '{"signature": "def solve(arr, k)", "args": [{"name": "arr", "type": "List[int]", "range": ""}], "returns": "List[int]"}\n'
+        "```\n"
+    )
+    monkeypatch.setattr(nodes, "try_invoke_with_fallback", lambda *a, **k: (plan_text, False))
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: {"passed": True, "issues": ""})
+    out = nodes.planner({"clarified_intent": "rotate array"})
+    assert out["function_signature"] == "def solve(arr, k)"
+    assert out["arg_spec"] == [{"name": "arr", "type": "List[int]", "range": ""}]
+    assert not any("CONTRACT" in s or s.startswith("{") for s in out["plan_steps"])
 
 
 def test_valid_test_enforces_arity():

@@ -13,6 +13,7 @@ from .prompts import (
     INTENT_SYSTEM,
     PLANNER_SYSTEM,
     TESTGEN_SYSTEM,
+    args_in_range,
     code_defines_signature,
     critique,
     extract_code,
@@ -239,7 +240,7 @@ def planner(state: dict) -> dict:
     return out
 
 
-def _valid_test(item: object, sig: str | None = None) -> dict | None:
+def _valid_test(item: object, sig: str | None = None, arg_spec: list | None = None) -> dict | None:
     if not isinstance(item, dict):
         return None
     tid = str(item.get("id", "")).strip()
@@ -255,6 +256,8 @@ def _valid_test(item: object, sig: str | None = None) -> dict | None:
         return None
     if sig and not harness_matches(harness, sig):
         return None
+    if arg_spec and not args_in_range(arg_spec, harness):
+        return None
     return {"id": tid, "harness": harness, "expected": expected.strip()}
 
 
@@ -262,6 +265,7 @@ def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
+    arg_spec = state.get("arg_spec", [])
     code = state.get("code", "")
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
     if sig:
@@ -274,7 +278,7 @@ def test_case_gen(state: dict) -> dict:
     parsed = extract_json_array(text)
     if not parsed:
         return {"test_cases": []}
-    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None))]
+    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None, arg_spec or None))]
     overruled = False
     if tests:
         import json as _json
@@ -285,7 +289,7 @@ def test_case_gen(state: dict) -> dict:
             if text2:
                 parsed2 = extract_json_array(text2)
                 if parsed2:
-                    tests = [t for item in parsed2[:MAX_TESTS] if (t := _valid_test(item, sig or None))]
+                    tests = [t for item in parsed2[:MAX_TESTS] if (t := _valid_test(item, sig or None, arg_spec or None))]
                     verdict2 = critique("tests", _json.dumps(tests)[:4000], intent)
                     overruled = bool(verdict2 and not verdict2["passed"])
                 else:

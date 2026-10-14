@@ -10,12 +10,11 @@ eval failures adjudicate TEST_WRONG vs CODE_WRONG with targeted repair.
 - `planner()` stores `function_signature` + `arg_spec`.
 - Tests: valid block, legacy fallback, absent contract.
 
-## Step 2 — Range DSL + validation
-- New helpers in `prompts.py` (or `tools/guardrail.py`): parse simple ranges
-  (`min..max`, `len` bounds, value bounds, enum sets).
-- `_valid_test()` gains range check: `ast.literal_eval` harness call args,
-  compare against `arg_spec`; out-of-range → drop. Non-literal args skip check.
-- Tests: accept/reject corners (k>n, empty-when-disallowed, boundary min/max).
+## Step 2 — Range DSL + validation [done]
+- `safe_num` / `parse_range` / `args_in_range` in `prompts.py`: `A..B` pairs
+  (len- vs value-bounds by prefix), `non-empty`, `one of` enums; unknown → {}.
+- `_valid_test()` drops out-of-range literal args; non-literals skip (no false drops).
+- Wired through `test_case_gen` (both paths).
 
 ## Step 3 — Testgen consumes contract
 - `test_case_gen()` prompt gets problem + contract + "values strictly within

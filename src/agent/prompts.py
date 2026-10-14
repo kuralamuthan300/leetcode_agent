@@ -246,3 +246,149 @@ def harness_matches(harness: str, sig: str) -> bool:
             if given == len(want):
                 return True
     return False
+
+
+def safe_num(token: str) -> float | None:
+    """Evaluate a numeric token with only safe operators (**, *, /, +, -, e-notation)."""
+    import ast
+    import operator
+
+    token = token.strip().replace(",", "").replace("^", "**")
+    if not token or not re.fullmatch(r"[\d\s.eE+\-*/()]+", token):
+        return None
+    try:
+        tree = ast.parse(token, mode="eval")
+    except SyntaxError:
+        return None
+    allowed = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+        ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd, ast.Mod,
+    )
+    if any(not isinstance(n, allowed) or (isinstance(n, ast.Constant) and not isinstance(n.value, (int, float))) for n in ast.walk(tree)):
+        return None
+    ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+           ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod}
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant):
+            return n.value
+        if isinstance(n, ast.UnaryOp):
+            return (1 if isinstance(n.op, ast.UAdd) else -1) * ev(n.operand)
+        if isinstance(n, ast.BinOp):
+            return ops[type(n.op)](ev(n.left), ev(n.right))
+        raise ValueError("unsafe")
+
+    try:
+        return ev(tree)
+    except Exception:
+        return None
+
+
+def parse_range(range_str: str) -> dict:
+    """Parse free-form planner ranges into checkable bounds.
+
+    Understands `A..B` pairs (value bounds, or len bounds when preceded by
+    len/length/size), `non-empty`, and `one of: a, b` enums. Unknown text
+    yields {} (no constraints, never rejects).
+    """
+    spec: dict = {}
+    low = (range_str or "").lower()
+    pairs = []
+    for m in re.finditer(r"(.{0,12}?)\.\.(.{0,24}?)($|[,;])", low):
+        left = re.findall(r"-?[\d][\d,._eE*^ +\-/()]*$", m.group(1))
+        right = re.findall(r"^ *\(? *-?[\d][\d,._eE*^ +\-/()]*", m.group(2))
+        if not left or not right:
+            continue
+        lo, hi = safe_num(left[-1]), safe_num(right[0])
+        if lo is None or hi is None:
+            continue
+        pairs.append((m.group(1), lo, hi))
+    for prefix, lo, hi in pairs:
+        pre = re.sub(r"[\d\s.,()]+$", "", prefix)
+        if re.search(r"(len|length|size)", pre):
+            spec["min_len"] = lo if spec.get("min_len") is None else max(spec["min_len"], lo)
+            spec["max_len"] = hi if spec.get("max_len") is None else min(spec["max_len"], hi)
+        elif "min" not in spec:
+            spec["min"], spec["max"] = lo, hi
+    if re.search(r"non-?empty|at least 1|1 or more", low):
+        spec["min_len"] = max(1, spec.get("min_len") or 0)
+    m = re.search(r"one of\s*:(.+)", low)
+    if m:
+        spec["enum"] = [v.strip() for v in m.group(1).split(",") if v.strip()][:10]
+    return spec
+
+
+def _in_bounds(value, spec: dict) -> bool:
+    import numbers
+
+    if not spec:
+        return True
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, numbers.Real):
+        if spec.get("min") is not None and value < spec["min"]:
+            return False
+        if spec.get("max") is not None and value > spec["max"]:
+            return False
+        return True
+    if isinstance(value, (str, bytes, list, tuple, set, dict)):
+        n = len(value)
+        if spec.get("min_len") is not None and n < spec["min_len"]:
+            return False
+        if spec.get("max_len") is not None and n > spec["max_len"]:
+            return False
+        if isinstance(value, (list, tuple)) and (spec.get("min") is not None or spec.get("max") is not None):
+            elems = [e for e in value if isinstance(e, numbers.Real) and not isinstance(e, bool)]
+            if elems and len(elems) == len(value):
+                return all(_in_bounds(e, {"min": spec.get("min"), "max": spec.get("max")}) for e in elems)
+        return True
+    if spec.get("enum") and value not in spec["enum"]:
+        return False
+    return True
+
+
+def solve_call_args(harness: str) -> list | None:
+    """Literal arg values of the first solve() call; None if unparseable."""
+    import ast
+
+    try:
+        tree = ast.parse(harness)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "solve":
+            vals = []
+            for a in node.args:
+                try:
+                    vals.append(ast.literal_eval(a))
+                except (ValueError, SyntaxError):
+                    return None
+            for kw in node.keywords:
+                try:
+                    vals.append(ast.literal_eval(kw.value))
+                except (ValueError, SyntaxError):
+                    return None
+            return vals
+    return None
+
+
+def args_in_range(arg_spec: list, harness: str) -> bool:
+    """Every literal harness arg satisfies its contracted range.
+
+    Non-literal args or missing specs skip the check (never false-drop).
+    """
+    if not arg_spec:
+        return True
+    vals = solve_call_args(harness)
+    if not vals:
+        return True
+    specs = {a.get("name"): parse_range(a.get("range", "")) for a in arg_spec if isinstance(a, dict)}
+    names = [a.get("name") for a in arg_spec if isinstance(a, dict)]
+    for i, v in enumerate(vals):
+        if i >= len(names):
+            break
+        if not _in_bounds(v, specs.get(names[i], {})):
+            return False
+    return True

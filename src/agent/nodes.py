@@ -420,10 +420,14 @@ def evaluator(state: dict) -> dict:
     to planner with error_class set (Step 3).
     """
     from .errors import classify_error
+    from .prompts import adjudicate
     from .tools.sandbox import run_python
 
     code = state.get("code", "")
     tests = state.get("test_cases", [])
+    sig = state.get("function_signature", "")
+    arg_spec = state.get("arg_spec", [])
+    problem = state.get("clarified_intent", "")
     iterations = state.get("iterations", 0) + 1
     smoke_err = (state.get("coder_smoke") or {}).get("error", "")
     if smoke_err and classify_error(smoke_err) in ("mechanical", "blocked", "timeout"):
@@ -439,15 +443,19 @@ def evaluator(state: dict) -> dict:
     for t in tests:
         r = run_python(code, harness=t["harness"])
         ok = not r["error"] and r["stdout"].strip() == t["expected"].strip()
-        results.append(
-            {
-                "test_id": t["id"],
-                "passed": ok,
-                "actual": r["stdout"].strip()[:2000],
-                "expected": t["expected"].strip()[:2000],
-                "error": r["error"][:2000],
-            }
-        )
+        entry = {
+            "test_id": t["id"],
+            "passed": ok,
+            "actual": r["stdout"].strip()[:2000],
+            "expected": t["expected"].strip()[:2000],
+            "error": r["error"][:2000],
+            "blame": "none",
+        }
+        if not ok:
+            verdict = adjudicate(problem, sig, arg_spec, code, entry)
+            entry["blame"] = verdict["blame"]
+            entry["error"] = (f"[blame:{verdict['blame']}] {verdict['reason']} " + entry["error"])[:2000]
+        results.append(entry)
     passed_count = sum(1 for r in results if r["passed"])
     if not tests:
         ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated", "error_class": "empty"}

@@ -8,6 +8,7 @@ class ExecutionResult(TypedDict):
     actual: str
     expected: str
     error: str
+    blame: str  # none | code | test | unknown
 
 
 class EvalReport(TypedDict):

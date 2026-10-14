@@ -21,11 +21,11 @@ eval failures adjudicate TEST_WRONG vs CODE_WRONG with targeted repair.
   boundary coverage (min/max/empty-if-allowed); `returns_spec` stored.
 - Regen path shares user + validation. No graph change.
 
-## Step 4 — Blame adjudicator
-- New `adjudicate(problem, contract, code, failing_test)` in `prompts.py`:
-  deterministic contract/range check first (violation ⇒ TEST_WRONG, no LLM);
-  else one small-model verdict call (`CODE_WRONG` / `TEST_WRONG` + reason).
-- Record `blame` per failure into `execution_results`.
+## Step 4 — Blame adjudicator [done]
+- `adjudicate()` in `prompts.py`: contract/range violations ⇒ TEST_WRONG
+  without LLM; else one small-model verdict (`CODE_WRONG`/`TEST_WRONG`/`UNKNOWN`).
+- `blame` recorded per failure in `execution_results` (+ surfaced in feedback).
+- Verified live (subtraction bug correctly blamed on code).
 
 ## Step 5 — Targeted repair routing
 - `evaluator()`: TEST_WRONG → new `repair_test()` sub-step (regen that test

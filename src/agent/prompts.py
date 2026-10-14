@@ -76,6 +76,15 @@ CRITIC_SYSTEM = (
     "ISSUES: <short comma-separated list>. Be strict but fair."
 )
 
+JUDGE_SYSTEM = (
+    "You adjudicate a failed test. Given the problem, the function contract, "
+    "the solution code, and one failing test (harness, expected, actual, error), "
+    "decide who is wrong. Reply with exactly one line: "
+    "CODE_WRONG: <reason> if the solution is buggy, "
+    "TEST_WRONG: <reason> if the test's expectation or inputs are wrong, "
+    "else UNKNOWN."
+)
+
 PLAN_CHECKLIST = (
     "1. States one approach. 2. States time/space complexity. "
     "3. Has numbered implementation steps. "
@@ -95,6 +104,43 @@ TESTS_CHECKLIST = (
     "2. Every harness calls solve and prints the result. "
     "3. Expected outputs are plausible for the problem."
 )
+
+
+def adjudicate(problem: str, sig: str, arg_spec: list, code: str, test: dict) -> dict:
+    """Blame a failing test: {"blame": code|test|unknown, "reason": str}.
+
+    Deterministic contract violations (arity, out-of-range args) blame the
+    test without any LLM call; the rest goes to one small-model verdict.
+    """
+    harness = test.get("harness", "")
+    if sig and not harness_matches(harness, sig):
+        return {"blame": "test", "reason": "harness arity violates contract"}
+    if arg_spec and not args_in_range(arg_spec, harness):
+        return {"blame": "test", "reason": "harness args out of contracted range"}
+    contract = _contract_brief_fallback(sig, arg_spec)
+    user = (
+        f"Problem:\n{problem[:2000]}\n\n{contract}\n\nCode:\n{code[:3000]}\n\n"
+        f"Failing test {test.get('test_id')}: harness={harness[:500]} "
+        f"expected={test.get('expected', '')[:500]!r} actual={test.get('actual', '')[:500]!r} "
+        f"error={test.get('error', '')[:500]!r}"
+    )
+    verdict = try_invoke("small", user, JUDGE_SYSTEM)
+    if not verdict:
+        return {"blame": "unknown", "reason": "judge unavailable"}
+    up = verdict.strip().upper()
+    if up.startswith("CODE_WRONG:"):
+        return {"blame": "code", "reason": verdict[len("CODE_WRONG:"):].strip()[:300]}
+    if up.startswith("TEST_WRONG:"):
+        return {"blame": "test", "reason": verdict[len("TEST_WRONG:"):].strip()[:300]}
+    return {"blame": "unknown", "reason": verdict[:300]}
+
+
+def _contract_brief_fallback(sig: str, arg_spec: list) -> str:
+    lines = [f"Contract: {sig or 'def solve(...)'}"]
+    for a in arg_spec or []:
+        if isinstance(a, dict) and a.get("name"):
+            lines.append(f"- {a.get('name')}: {a.get('type', '')} range {a.get('range', '')}")
+    return "\n".join(lines)
 
 
 def critique(kind: str, artifact: str, context: str = "") -> dict | None:

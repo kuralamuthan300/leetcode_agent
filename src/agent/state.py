@@ -29,6 +29,7 @@ class AgentState(TypedDict, total=False):
     plan_steps: list[str]
     function_signature: str
     arg_spec: list[dict[str, str]]
+    returns_spec: str
     test_cases: list[dict[str, Any]]
     code: str
     coder_smoke: dict[str, str]

@@ -233,6 +233,7 @@ def planner(state: dict) -> dict:
     if contract:
         out["function_signature"] = contract["signature"]
         out["arg_spec"] = contract["args"]
+        out["returns_spec"] = contract["returns"]
     if fell_back:
         out["fallback_used"] = True
     if overruled:
@@ -261,13 +262,31 @@ def _valid_test(item: object, sig: str | None = None, arg_spec: list | None = No
     return {"id": tid, "harness": harness, "expected": expected.strip()}
 
 
+def _contract_brief(sig: str, arg_spec: list, returns_spec: str = "") -> str:
+    """Render the planner contract for the testgen prompt."""
+    lines = [f"Contract: {sig or 'def solve(...)'}"]
+    for a in arg_spec or []:
+        if isinstance(a, dict) and a.get("name"):
+            rng = f", range: {a['range']}" if a.get("range") else ""
+            typ = f": {a['type']}" if a.get("type") else ""
+            lines.append(f"- {a['name']}{typ}{rng}")
+    if returns_spec:
+        lines.append(f"Returns: {returns_spec}")
+    return "\n".join(lines)
+
+
 def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
     arg_spec = state.get("arg_spec", [])
     code = state.get("code", "")
-    user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
+    user = f"Problem:\n{intent}\n\nPlan:\n{plan}\n\n{_contract_brief(sig, arg_spec, state.get('returns_spec', ''))}"
+    user += (
+        "\nGenerate values strictly within these ranges. "
+        "Cover boundaries: a minimum-boundary case, a maximum-boundary case, "
+        "and an empty-input case only if the contract allows empty."
+    )
     if sig:
         user += f"\n\nCall the function exactly as contracted: {sig}"
     if code and not code.strip().startswith("# TODO"):

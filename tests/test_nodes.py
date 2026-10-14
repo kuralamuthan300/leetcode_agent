@@ -121,7 +121,31 @@ def test_planner_stores_contract(monkeypatch):
     out = nodes.planner({"clarified_intent": "rotate array"})
     assert out["function_signature"] == "def solve(arr, k)"
     assert out["arg_spec"] == [{"name": "arr", "type": "List[int]", "range": ""}]
+    assert out["returns_spec"] == "List[int]"
     assert not any("CONTRACT" in s or s.startswith("{") for s in out["plan_steps"])
+
+
+def test_testgen_prompt_carries_contract(monkeypatch):
+    import agent.nodes as nodes
+
+    seen = {}
+
+    def fake_gen(*a, **k):
+        seen["user"] = a[1]
+        return '[{"id": "t1", "harness": "print(solve([1], 0))", "expected": "x"}]'
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    out = nodes.test_case_gen({
+        "clarified_intent": "rotate",
+        "plan_steps": [],
+        "function_signature": "def solve(arr, k)",
+        "arg_spec": [{"name": "k", "type": "int", "range": "0..10"}],
+        "code": "",
+    })
+    assert "Contract: def solve(arr, k)" in seen["user"]
+    assert "strictly within these ranges" in seen["user"]
+    assert "boundary" in seen["user"]
+    assert len(out["test_cases"]) == 1
 
 
 def test_valid_test_enforces_arity():

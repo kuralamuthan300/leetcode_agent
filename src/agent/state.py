@@ -40,4 +40,5 @@ class AgentState(TypedDict, total=False):
     rejected: bool
     rejection_reason: str
     critic_overruled: bool
+    session_notes: list[str]
     output_path: str

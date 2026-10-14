@@ -67,3 +67,9 @@ run) so planner rectifies; `error_class` none/logical/empty otherwise.
 ## Step 13 — State/reporter completeness [done]
 `function_signature`, `critic_overruled`, `error_class` verified in state +
 reporter JSON (`tests/test_reporter.py` asserts exact schema).
+
+## Step 14 — Fullest gatherer [done]
+Always-confirm on TTY (understanding + assumptions + remembered conventions,
+Enter accepts, free-text corrects, max 2 rounds); disambiguation-only
+questions; per-session memory (`session.py`, `/tmp` file, `--fresh` resets,
+ignored off-TTY); `session_notes` in state + JSON.

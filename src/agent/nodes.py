@@ -80,9 +80,12 @@ def _confirm_with_user(understanding: str, assumptions: list[str], questions: li
         print("\nAssumptions:")
         for a in assumptions:
             print(f"- {a[:200]}")
-    print("\nOpen questions:")
-    for i, q in enumerate(questions, 1):
-        print(f"{i}. {q}")
+    if questions:
+        print("\nOpen questions:")
+        for i, q in enumerate(questions, 1):
+            print(f"{i}. {q}")
+    else:
+        print("\nNo open questions.")
     try:
         answer = input("Confirm (Enter=yes) or type corrections: ")
     except EOFError:
@@ -142,21 +145,34 @@ def requirement_gatherer(state: dict) -> dict:
 
     needs_confirmation = is_truncated(req) or not is_intent_clear(text)
     confirmed, assumed = True, False
-    if needs_confirmation:
-        questions = _missing_questions(req, text)
-        if sys.stdin.isatty():
-            ok = False
-            for _ in range(2):
-                extra, ok = _confirm_with_user(text, _assumptions(text), questions)
-                if ok:
-                    break
-                req = f"{req}\nUser clarification: {extra.strip()}"
-                follow = try_invoke("small", f"Requirement:\n{req}", INTENT_SYSTEM)
-                text = follow if follow else text
-            confirmed = ok
-            assumed = not ok
-        else:
-            assumed = True
+    session_notes: list[str] = []
+    remembered: list[str] = []
+    if sys.stdin.isatty():
+        from . import session as session_mem
+
+        remembered = session_mem.load()
+        if remembered:
+            session_notes = [f"(remembered) {c}" for c in remembered]
+            ctx = "Session conventions (already confirmed, apply them):\n" + "\n".join(f"- {c}" for c in remembered)
+            follow = try_invoke("small", f"{ctx}\n\nRequirement:\n{req}", INTENT_SYSTEM)
+            if follow:
+                text = follow
+        questions = _missing_questions(req, text) if needs_confirmation else []
+        for _ in range(2):
+            extra, ok = _confirm_with_user(text, _assumptions(text) + session_notes, questions)
+            if ok:
+                break
+            req = f"{req}\nUser clarification: {extra.strip()}"
+            session_mem.remember([extra.strip()])
+            follow = try_invoke("small", f"Requirement:\n{req}", INTENT_SYSTEM)
+            text = follow if follow else text
+            questions = _missing_questions(req, text)
+        confirmed = ok
+        assumed = not ok
+        if ok:
+            session_mem.remember(_assumptions(text))
+    elif needs_confirmation:
+        assumed = True
     return {
         "clarified_intent": text,
         "requirement": req,
@@ -164,6 +180,7 @@ def requirement_gatherer(state: dict) -> dict:
         "intent_clear": is_intent_clear(text) and not assumed,
         "confirmed": confirmed,
         "assumed": assumed,
+        "session_notes": session_notes,
     }
 
 
@@ -449,6 +466,7 @@ def run_reporter(state: dict) -> dict:
         "guardrail_report": state.get("guardrail_report", {}),
         "fallback_used": state.get("fallback_used", False),
         "critic_overruled": state.get("critic_overruled", False),
+        "session_notes": state.get("session_notes", []),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
     }

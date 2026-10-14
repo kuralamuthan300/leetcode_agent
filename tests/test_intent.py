@@ -11,6 +11,11 @@ def _no_llm(monkeypatch):
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
 
 
+@pytest.fixture(autouse=True)
+def _tmp_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCODEAGENT_SESSION", str(tmp_path / "session.json"))
+
+
 def test_truncated_assumed_offline(tmp_path, monkeypatch):
     """Non-TTY vague input proceeds flagged assumed (Bug 1 class)."""
     monkeypatch.chdir(tmp_path)

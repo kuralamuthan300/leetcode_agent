@@ -24,7 +24,7 @@ def test_main_uses_prompt_when_no_args(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    answers = iter(["Sort the array.", ""])
+    answers = iter(["Sort the array.", "", "ok"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     seen = {}

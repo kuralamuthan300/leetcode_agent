@@ -1,7 +1,7 @@
 # Agent Architecture — LangGraph DSA Solver
 
 Branch: `task/step-1-5` | Updated: 2026-10-13
-Status: RequirementGatherer + signature contract + replace-results + gemma-all-models (fix-proof E2E 4/4).
+Status: RequirementGatherer + critics + sequential chain + gemma-all-models (53 tests green).
 
 ## Goal
 Terminal-driven LangGraph agent that solves data-structures & algorithms problems,

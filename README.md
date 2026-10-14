@@ -56,7 +56,7 @@ Add `--verbose` to also print the final code and tests.
 ## Test
 
 ```bash
-PYTHONPATH=src uv run pytest -q   # 22 tests (hermetic fallbacks + one live-graph E2E)
+PYTHONPATH=src uv run pytest -q   # 53 tests (hermetic fallbacks + live-graph E2E)
 ```
 
 ## Layout

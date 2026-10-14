@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from operator import add
-from typing import Annotated, Any, TypedDict
-
+from typing import Any, TypedDict
 
 class ExecutionResult(TypedDict):
     test_id: str
@@ -10,6 +8,8 @@ class ExecutionResult(TypedDict):
     actual: str
     expected: str
     error: str
+    blame: str  # none | code | test | unknown
+    repaired: bool
 
 
 class EvalReport(TypedDict):
@@ -17,6 +17,7 @@ class EvalReport(TypedDict):
     passed_count: int
     total: int
     feedback: str
+    error_class: str  # none | logical | mechanical | empty
 
 
 class AgentState(TypedDict, total=False):
@@ -25,12 +26,22 @@ class AgentState(TypedDict, total=False):
     clarified_intent: str
     intent_iterations: int
     intent_clear: bool
+    confirmed: bool
+    assumed: bool
     plan_steps: list[str]
+    function_signature: str
+    arg_spec: list[dict[str, str]]
+    returns_spec: str
     test_cases: list[dict[str, Any]]
     code: str
     coder_smoke: dict[str, str]
-    execution_results: Annotated[list[ExecutionResult], add]
+    guardrail_report: dict
+    execution_results: list[ExecutionResult]  # replace semantics: latest run only
     eval: EvalReport
     feedback: str
     iterations: int
+    fallback_used: bool
+    rejected: bool
+    rejection_reason: str
+    critic_overruled: bool
     output_path: str

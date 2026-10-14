@@ -1,5 +1,16 @@
 import json
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_llm(monkeypatch):
+    import agent.llms as llms
+
+    monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+
 
 def test_toolbox_runs_coder_code():
     from agent.tools.sandbox import python_toolbox, run_python

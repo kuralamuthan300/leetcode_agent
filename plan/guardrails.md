@@ -1,6 +1,6 @@
 # Guardrails — Coder Sandbox Security
 
-Updated: 2026-10-13 | Status: spec only, not implemented.
+Updated: 2026-10-13 | Status: implemented on `task/step-1-5` (`tools/guardrail.py`, gated `run_python`, `guardrail_report` in state/output, `tests/test_guardrails.py` green).
 Enforcement: fail-closed (blocked code never executes).
 
 ## Threat model
@@ -10,6 +10,26 @@ and sandbox escape via stdlib (`os`, `subprocess`, `socket`, `pathlib`, ...).
 
 ## Gate order
 `Coder code + harness -> guardrail.check() -> [blocked: return error JSON, no exec] / [allowed: run_python() in hard jail]`
+
+## 0a. Python-only language gate (entry)
+`check_language()` runs first in IntentClarifier: explicit non-Python
+languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
+console.log, #include, …), or 2+ SQL keywords → `rejected: True`,
+straight to RunReporter, no LLM burn. Neutral DSA defaults to Python;
+explicit "python" always wins. Non-Python *code* is also backstopped by
+the AST gate (foreign syntax fails parse → blocked).
+
+## 0b. DSA-scope gate (entry, after language gate)`check_scope()` fast paths: DSA markers (array, linked list, binary search,
+dynamic programming, …) → allow; non-coding markers (essay, poem, summarize,
+weather, …) → `rejected`. Gray zone → one small-LLM verdict (`SCOPE_SYSTEM`);
+LLM failure rejects (fail-closed). Neutral-but-vague coding asks go to the
+classifier, never silently through.
+`check_language()` runs first in IntentClarifier: explicit non-Python
+languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
+console.log, #include, …), or 2+ SQL keywords → `rejected: True`,
+straight to RunReporter, no LLM burn. Neutral DSA defaults to Python;
+explicit "python" always wins. Non-Python *code* is also backstopped by
+the AST gate (foreign syntax fails parse → blocked).
 
 ## 1. Static gate (`src/agent/tools/guardrail.py::check`)
 - Parse both `code` and `harness` with `ast`.
@@ -56,3 +76,9 @@ and sandbox escape via stdlib (`os`, `subprocess`, `socket`, `pathlib`, ...).
 2. Harden `run_python` builtins/importer/limits.
 3. `guardrail_report` in state/output + retry wiring.
 4. Corpus tests green; container isolation later.
+
+## Contract as truth (adjudication)
+The planner's `CONTRACT` (signature + arg ranges) is the source of truth when
+code and tests disagree: harness arity/range violations blame the test
+deterministically and can never trigger code repair. See
+`plan/contract_adjudication.md`.

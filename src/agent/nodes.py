@@ -236,12 +236,23 @@ def test_case_gen(state: dict) -> dict:
     return {"test_cases": tests}
 
 
-def _smoke(code: str) -> tuple[dict, dict]:
+def _smoke(code: str, sig: str = "") -> tuple[dict, dict]:
+    from .errors import dummy_args, is_call_failure
     from .tools import guardrail_report as gate
     from .tools.sandbox import run_python
 
     report = gate(code, "print('smoke: imports ok')")
     smoke = run_python(code, harness="print('smoke: imports ok')")
+    if smoke["error"] or not sig:
+        return smoke, report
+    # Call-smoke: actually invoke solve() to catch body NameErrors.
+    # Other dummy-input exceptions are noted, not failed (see errors.py).
+    call = run_python(code, harness=f"print(solve({', '.join(dummy_args(sig))}))")
+    if is_call_failure(call["error"]):
+        return {"stdout": call["stdout"], "stderr": call["stderr"], "error": call["error"]}, report
+    if call["error"]:
+        smoke = dict(smoke)
+        smoke["note"] = f"call-smoke (ignored): {call['error'][:200]}"
     return smoke, report
 
 
@@ -272,7 +283,7 @@ def coder(state: dict) -> dict:
         fell_back = fell_back or repair_fell_back
         if fixed:
             code = extract_code(fixed)
-    smoke, report = _smoke(code)
+    smoke, report = _smoke(code, sig)
 
     if smoke["error"] and not smoke["error"].startswith("blocked:") and text:
         repair_user = (
@@ -283,7 +294,7 @@ def coder(state: dict) -> dict:
         fell_back = fell_back or repair_fell_back
         if fixed:
             code = extract_code(fixed)
-            smoke, report = _smoke(code)
+            smoke, report = _smoke(code, sig)
 
     out: dict = {"code": code, "coder_smoke": smoke, "guardrail_report": report}
     if fell_back:

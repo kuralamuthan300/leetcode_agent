@@ -46,3 +46,9 @@ Two Sum ✅ 5/5, Valid Parentheses ✅ 5/5, Binary Search ✅ 5/5 via CLI
 ## Step 9 — Finalize [done]
 Architecture status updated, `output/run_id_*.json` artifacts cleaned,
 `git status` shows only intended files, 18 tests green.
+
+## Step 10 — Coder smoke-call + error classifier [done]
+`src/agent/errors.py`: `classify_error` (none/blocked/timeout/mechanical/logical),
+smoke-call fails only on NameError/ImportError (dummy-input type errors noted,
+not failed); `dummy_args` from signature annotations. Coder calls `solve()`
+after import check (skipped without signature/stub).

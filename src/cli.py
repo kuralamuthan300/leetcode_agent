@@ -85,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--file", help="Path to file with problem statement")
     ap.add_argument("--run-id", help="Override run_id")
     ap.add_argument("--verbose", action="store_true", help="Print code and tests too")
-    ap.add_argument("--fresh", action="store_true", help="Clear gatherer session memory and start fresh")
     args = ap.parse_args(argv)
 
     if args.file:
@@ -101,11 +100,6 @@ def main(argv: list[str] | None = None) -> int:
         console.print("[red]Empty requirement.[/red]")
         return 2
 
-    if args.fresh:
-        from agent.session import clear
-
-        clear()
-        console.print("[dim]Session memory cleared.[/dim]")
 
     run_id = args.run_id or _new_run_id()
     graph = build_graph()

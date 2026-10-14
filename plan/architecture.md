@@ -32,15 +32,14 @@ graph TD
 ```
 
 ## Models (Ollama)
-- Heavy + small `gemma4:31b-cloud`: all nodes (gemma3 retired upstream; single
-  family keeps prompts consistent).
+- Heavy `nemotron-3-super:cloud`, small + critic `gemma4:31b-cloud`.
 - `src/agent/llms.py`: `get_small()` temp 0 / 4096 tokens / 90s timeout,
   `get_heavy()` temp 0.2 / 180s timeout, `get_critic()` 512 tokens / 60s timeout.
 - Env: `OLLAMA_HEAVY`, `OLLAMA_SMALL`, `OLLAMA_BASE_URL` (default `http://localhost:11434`).
 
 ## State (`src/agent/state.py`)
 `run_id, requirement, clarified_intent, intent_iterations, intent_clear,`
-`confirmed, assumed, session_notes, plan_steps, function_signature, arg_spec,`
+`confirmed, assumed, plan_steps, function_signature, arg_spec,`
 `returns_spec, test_cases, code,`
 `coder_smoke{stdout,stderr,error}, guardrail_report{allowed,reasons[],checked_at},`
 `fallback_used, critic_overruled, execution_results (replace semantics),`
@@ -49,10 +48,9 @@ graph TD
 ## Nodes (`src/agent/nodes.py`)
 1. RequirementGatherer: Python-only + DSA-scope gates (rejects → reporter);
    truncation forces user questions; TTY *always* shows understanding +
-   assumptions (+ remembered conventions) and waits for Enter (max 2
-   correction rounds); per-session memory (`session.py`, `/tmp` file,
-   `--fresh` resets, ignored off-TTY); non-TTY proceeds `assumed`.
-   Emits `clarified_intent`, `confirmed`/`assumed`, `session_notes`.
+   assumptions and waits for Enter (max 2 correction rounds);
+   non-TTY proceeds `assumed` when vague.
+   Emits `clarified_intent`, `confirmed`/`assumed`.
 2. Planner (heavy, small fallback): LLM plan + fenced JSON `CONTRACT`
    (signature + typed args/ranges + returns; legacy `SIGNATURE:` accepted);
    consumes `feedback` on retry; stub if both models fail.
@@ -84,7 +82,7 @@ regen each; `critic_overruled` set when proceeding with open issues.
 - Live status: one line per node via `graph.stream` (`✓` done, `↻` retry, `⚠` blocked, `⛔` rejected, `(fallback)`/`(assumed)` tags).
 - JSON schema: `run_id, timestamp, models{heavy,small}, requirement, rejected,`
   `rejection_reason, clarified_intent, intent_iterations, intent_clear,`
-  `confirmed, assumed, session_notes, plan_steps, function_signature, arg_spec,`
+  `confirmed, assumed, plan_steps, function_signature, arg_spec,`
   `returns_spec, test_cases, code,`
   `coder_smoke, guardrail_report, fallback_used, critic_overruled, execution_results, eval`.
 - Written by RunReporter to `output/<run_id>.json` (also on exhausted retries with `passed:false`).
@@ -97,7 +95,7 @@ Implementation: `src/agent/tools/guardrail.py`, `src/agent/errors.py`
 
 ## Project setup (uv)
 - `pyproject.toml`: `langgraph, langchain-ollama, langchain-core, pydantic, rich`; dev `pytest, ruff`.
-- Layout: `src/agent/{state,llms,prompts,nodes,graph,errors,session,tools/sandbox,tools/guardrail}.py`, `src/cli.py`,
+- Layout: `src/agent/{state,llms,prompts,nodes,graph,errors,tools/sandbox,tools/guardrail}.py`, `src/cli.py`,
   `tests/{test_graph,test_sandbox,test_intent,test_toolbox,test_guardrails,test_nodes,test_cli,test_scope,test_language,test_smoke,test_reporter,test_session}.py`, `output/.gitkeep`, `plan/`.
 - Verify: `uv sync`, `PYTHONPATH=src uv run pytest -q` (53 passed),
   `PYTHONPATH=src uv run python -m cli --problem "two sum..."`.

@@ -24,7 +24,6 @@ def test_reporter_schema_complete(tmp_path, monkeypatch):
         "guardrail_report": {"allowed": True},
         "fallback_used": False,
         "critic_overruled": False,
-        "session_notes": [],
         "execution_results": [],
         "eval": {"passed": True, "passed_count": 1, "total": 1, "feedback": "", "error_class": "none"},
     }

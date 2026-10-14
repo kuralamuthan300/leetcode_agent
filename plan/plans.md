@@ -68,8 +68,8 @@ run) so planner rectifies; `error_class` none/logical/empty otherwise.
 `function_signature`, `critic_overruled`, `error_class` verified in state +
 reporter JSON (`tests/test_reporter.py` asserts exact schema).
 
-## Step 14 — Fullest gatherer [done]
-Always-confirm on TTY (understanding + assumptions + remembered conventions,
-Enter accepts, free-text corrects, max 2 rounds); disambiguation-only
-questions; per-session memory (`session.py`, `/tmp` file, `--fresh` resets,
-ignored off-TTY); `session_notes` in state + JSON.
+## Step 14 — Fullest gatherer (memory removed) [done]
+Always-confirm on TTY (understanding + assumptions, Enter accepts, free-text
+corrects, max 2 rounds); disambiguation-only questions. Session memory
+(`session.py`, `--fresh`, `session_notes`) removed — every run starts fresh.
+Heavy model switched to `nemotron-3-super:cloud` (small/critic stay gemma4).

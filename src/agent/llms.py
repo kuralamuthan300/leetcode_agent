@@ -4,7 +4,7 @@ import os
 
 from langchain_ollama import ChatOllama
 
-HEAVY_MODEL = os.getenv("OLLAMA_HEAVY", "gemma4:31b-cloud")
+HEAVY_MODEL = os.getenv("OLLAMA_HEAVY", "nemotron-3-super:cloud")
 SMALL_MODEL = os.getenv("OLLAMA_SMALL", "gemma4:31b-cloud")
 BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 

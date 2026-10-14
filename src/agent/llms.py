@@ -11,7 +11,7 @@ BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # Wall-clock guardrails for inference (Step 7 tunes these).
 SMALL_TIMEOUT_S = int(os.getenv("OLLAMA_SMALL_TIMEOUT", "90"))
 HEAVY_TIMEOUT_S = int(os.getenv("OLLAMA_HEAVY_TIMEOUT", "180"))
-CRITIC_MODEL = os.getenv("OLLAMA_CRITIC", "gemma4:31b-cloud")
+CRITIC_MODEL = os.getenv("OLLAMA_CRITIC", "nemotron-3-super:cloud")
 
 
 def get_small() -> ChatOllama:
@@ -36,7 +36,7 @@ def get_heavy() -> ChatOllama:
 
 
 def get_critic() -> ChatOllama:
-    """Reviewer model (same family by default; override via OLLAMA_CRITIC).
+    """Reviewer model (nemotron by default; override via OLLAMA_CRITIC).
     Small budget: verdicts, not essays."""
     return ChatOllama(
         model=CRITIC_MODEL,

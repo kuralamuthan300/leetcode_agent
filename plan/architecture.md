@@ -32,7 +32,7 @@ graph TD
 ```
 
 ## Models (Ollama)
-- Heavy `nemotron-3-super:cloud`, small + critic `gemma4:31b-cloud`.
+- Heavy + critic `nemotron-3-super:cloud`, small `gemma4:31b-cloud`.
 - `src/agent/llms.py`: `get_small()` temp 0 / 4096 tokens / 90s timeout,
   `get_heavy()` temp 0.2 / 180s timeout, `get_critic()` 512 tokens / 60s timeout.
 - Env: `OLLAMA_HEAVY`, `OLLAMA_SMALL`, `OLLAMA_BASE_URL` (default `http://localhost:11434`).
@@ -72,7 +72,7 @@ graph TD
 Resilience: small 90s / heavy 180s client timeouts; heavy→small fallback sets
 `fallback_used` (planner, coder incl. repair); chain is sequential
 planner→coder→tests (testgen sees final code).
-Critics: `critique()` on gemma4 (512 tokens) reviews plan/code/tests with max 1
+Critics: `critique()` on nemotron (512 tokens) reviews plan/code/tests with max 1
 regen each; `critic_overruled` set when proceeding with open issues.
 
 ## CLI + Output

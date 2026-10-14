@@ -15,6 +15,7 @@ class EvalReport(TypedDict):
     passed_count: int
     total: int
     feedback: str
+    error_class: str  # none | logical | mechanical | empty
 
 
 class AgentState(TypedDict, total=False):

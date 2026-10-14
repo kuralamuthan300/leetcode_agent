@@ -9,10 +9,11 @@ verifies with generated tests in a sandbox, retries via feedback loop, and write
 `output/run_id_xxxx.json` with requirement, code, test cases.
 
 ## Graph
-`Start -> RequirementGatherer -(confirm/assume)-> Planner -> [TestCaseGen, Coder] -> Evaluator -> RunReporter -> End`
+`Start -> RequirementGatherer -(confirm/assume)-> Planner -> Coder -> TestCaseGen -> Evaluator -> RunReporter -> End`
 - Gatherer prints understanding + assumptions + questions, confirms inline on TTY
   (max 2 rounds); non-TTY proceeds flagged `assumed`. Truncated input forces questions.
-- `Evaluator --fail--> Planner` (max 3 iterations), else `--> RunReporter`.
+- `Evaluator --fail--> Planner` (max 3 iterations; mechanical smoke failure
+  short-circuits with `error_class`, no matrix run), else `--> RunReporter`.
 - `Coder -> guardrail.check() -> python_sandbox` tool (fail-closed; blocked never execs). Full spec: `guardrails.md`.
 
 ```mermaid
@@ -20,11 +21,10 @@ graph TD
     Start --> RequirementGatherer
     RequirementGatherer -.->|vague, confirms| RequirementGatherer
     RequirementGatherer --> Planner
-    Planner --> TestCaseGen
     Planner --> Coder
     Coder -.-> PythonSandbox
+    Coder --> TestCaseGen
     TestCaseGen --> Evaluator
-    Coder --> Evaluator
     Evaluator -.->|Feedback Loop| Planner
     Evaluator --> RunReporter
     RunReporter --> End

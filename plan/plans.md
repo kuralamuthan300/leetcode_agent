@@ -58,3 +58,8 @@ after import check (skipped without signature/stub).
 `PASS`/`ISSUES:`) wired as sub-steps in planner/coder/testgen: max 1
 critique→regen round each, `critic_overruled` flag on exhaust. Fail-open
 (critic down → proceed unflagged).
+
+## Step 12 — Sequential chain + mechanical short-circuit [done]
+`planner → coder → tests → evaluator` (testgen sees final code + signature).
+Evaluator short-circuits on smoke failure (`error_class: mechanical`, no matrix
+run) so planner rectifies; `error_class` none/logical/empty otherwise.

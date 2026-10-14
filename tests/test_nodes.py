@@ -174,6 +174,73 @@ def test_testgen_critic_regen(monkeypatch):
     assert "critic_overruled" not in out
 
 
+def test_evaluator_short_circuits_on_smoke_failure():
+    from agent.nodes import evaluator
+
+    code = "def solve(a):\n    return a\n"
+    tests = [{"id": "t1", "harness": "print(solve(1))", "expected": "1"}]
+    out = evaluator({
+        "code": code,
+        "test_cases": tests,
+        "coder_smoke": {"error": "NameError('x')"},
+    })
+    assert out["execution_results"] == []  # no matrix run
+    assert out["eval"]["passed"] is False
+    assert out["eval"]["error_class"] == "mechanical"
+    assert "smoke failed" in out["eval"]["feedback"]
+    assert out["iterations"] == 1
+
+
+def test_evaluator_error_classes():
+    from agent.nodes import evaluator
+
+    code = "def solve(a):\n    return a\n"
+    good = [{"id": "t1", "harness": "print(solve(1))", "expected": "1"}]
+    assert evaluator({"code": code, "test_cases": good})["eval"]["error_class"] == "none"
+    bad = [{"id": "t1", "harness": "print(solve(1))", "expected": "2"}]
+    assert evaluator({"code": code, "test_cases": bad})["eval"]["error_class"] == "logical"
+    assert evaluator({"code": code, "test_cases": []})["eval"]["error_class"] == "empty"
+
+
+def test_graph_order_planner_coder_tests(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    import agent.nodes as nodes
+
+    order = []
+    real = {}
+
+    for name in ("planner", "coder", "test_case_gen", "evaluator"):
+        real[name] = getattr(nodes, name)
+
+    def wrap(name, fn):
+        def inner(state):
+            order.append(name)
+            return fn(state)
+        return inner
+
+    import agent.graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "planner", wrap("planner", real["planner"]))
+    monkeypatch.setattr(graph_mod, "coder", wrap("coder", real["coder"]))
+    monkeypatch.setattr(graph_mod, "test_case_gen", wrap("tests", real["test_case_gen"]))
+    monkeypatch.setattr(graph_mod, "evaluator", wrap("evaluator", real["evaluator"]))
+    import agent.llms as llms
+
+    monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    g = graph_mod.build_graph()
+    g.invoke({"run_id": "run_id_order", "requirement": "Given an array of ints, return the sorted array. Example: [3,1] -> [1,3]."})
+    first = [n for n in order if n in ("planner", "coder", "tests")]
+    assert first[:3] == ["planner", "coder", "tests"], order
+    # every tests run is preceded by coder, every coder by planner (sequential chain)
+    for i, n in enumerate(first):
+        if n == "tests":
+            assert first[i - 1] == "coder", order
+        if n == "coder":
+            assert first[i - 1] == "planner", order
+
+
 def test_heavy_fallback_flag(monkeypatch):
     import agent.prompts as prompts
 

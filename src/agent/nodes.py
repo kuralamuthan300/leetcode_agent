@@ -237,9 +237,12 @@ def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
+    code = state.get("code", "")
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
     if sig:
         user += f"\n\nCall the function exactly as contracted: {sig}"
+    if code and not code.strip().startswith("# TODO"):
+        user += f"\n\nReference implementation (match its calls):\n{code[:2000]}"
     text = try_invoke("small", user, TESTGEN_SYSTEM)
     if not text:
         return {"test_cases": []}
@@ -363,12 +366,27 @@ def coder(state: dict) -> dict:
 
 
 def evaluator(state: dict) -> dict:
-    """Run each test harness against the code; fail-closed on empty tests."""
+    """Run each test harness against the code; fail-closed on empty tests.
+
+    Mechanical smoke failure short-circuits: no matrix run, straight back
+    to planner with error_class set (Step 3).
+    """
+    from .errors import classify_error
     from .tools.sandbox import run_python
 
     code = state.get("code", "")
     tests = state.get("test_cases", [])
     iterations = state.get("iterations", 0) + 1
+    smoke_err = (state.get("coder_smoke") or {}).get("error", "")
+    if smoke_err and classify_error(smoke_err) in ("mechanical", "blocked", "timeout"):
+        ev = {
+            "passed": False,
+            "passed_count": 0,
+            "total": len(tests),
+            "feedback": f"smoke failed ({classify_error(smoke_err)}), fix code first: {smoke_err[:500]}",
+            "error_class": "mechanical",
+        }
+        return {"execution_results": [], "eval": ev, "iterations": iterations}
     results = []
     for t in tests:
         r = run_python(code, harness=t["harness"])
@@ -384,7 +402,7 @@ def evaluator(state: dict) -> dict:
         )
     passed_count = sum(1 for r in results if r["passed"])
     if not tests:
-        ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated"}
+        ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated", "error_class": "empty"}
     else:
         failed = [r for r in results if not r["passed"]]
         details = "; ".join(
@@ -397,6 +415,7 @@ def evaluator(state: dict) -> dict:
             "passed_count": passed_count,
             "total": len(tests),
             "feedback": "" if not failed else f"failed {len(failed)}: {details}"[:2000],
+            "error_class": "none" if not failed else "logical",
         }
     return {"execution_results": results, "eval": ev, "iterations": iterations}
 

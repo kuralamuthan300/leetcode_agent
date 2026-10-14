@@ -40,10 +40,9 @@ def build_graph():
         "gather", _route_gather,
         {"gather": "gather", "planner": "planner", "reporter": "reporter"},
     )
-    g.add_edge("planner", "tests")
     g.add_edge("planner", "coder")
+    g.add_edge("coder", "tests")
     g.add_edge("tests", "evaluator")
-    g.add_edge("coder", "evaluator")
     g.add_conditional_edges("evaluator", _route_eval, {"planner": "planner", "reporter": "reporter"})
     g.add_edge("reporter", END)
     return g.compile()

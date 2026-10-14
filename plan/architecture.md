@@ -20,13 +20,14 @@ verifies with generated tests in a sandbox, retries via feedback loop, and write
 graph TD
     Start --> RequirementGatherer
     RequirementGatherer -.->|vague, confirms| RequirementGatherer
-    RequirementGatherer --> Planner
-    Planner --> Coder
-    Coder -.-> PythonSandbox
+    RequirementGatherer -->|confirmed / assumed| Planner
+    RequirementGatherer -.->|rejected: wrong language / non-DSA| RunReporter
+    Planner -->|plan + SIGNATURE + plan-critic| Coder
+    Coder -.->|gate + smoke-call + code-critic| PythonSandbox
     Coder --> TestCaseGen
-    TestCaseGen --> Evaluator
-    Evaluator -.->|Feedback Loop| Planner
-    Evaluator --> RunReporter
+    TestCaseGen -->|tests + test-critic| Evaluator
+    Evaluator -.->|fail: feedback + error_class| Planner
+    Evaluator -->|pass / retries exhausted| RunReporter
     RunReporter --> End
 ```
 

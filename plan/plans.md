@@ -63,3 +63,7 @@ critique→regen round each, `critic_overruled` flag on exhaust. Fail-open
 `planner → coder → tests → evaluator` (testgen sees final code + signature).
 Evaluator short-circuits on smoke failure (`error_class: mechanical`, no matrix
 run) so planner rectifies; `error_class` none/logical/empty otherwise.
+
+## Step 13 — State/reporter completeness [done]
+`function_signature`, `critic_overruled`, `error_class` verified in state +
+reporter JSON (`tests/test_reporter.py` asserts exact schema).

@@ -52,3 +52,9 @@ Architecture status updated, `output/run_id_*.json` artifacts cleaned,
 smoke-call fails only on NameError/ImportError (dummy-input type errors noted,
 not failed); `dummy_args` from signature annotations. Coder calls `solve()`
 after import check (skipped without signature/stub).
+
+## Step 11 — Local critics [done]
+`critique()` in `prompts.py` + `llms.get_critic()` (gemma4, 512-token verdicts,
+`PASS`/`ISSUES:`) wired as sub-steps in planner/coder/testgen: max 1
+critique→regen round each, `critic_overruled` flag on exhaust. Fail-open
+(critic down → proceed unflagged).

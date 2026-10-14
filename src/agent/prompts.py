@@ -63,6 +63,53 @@ SCOPE_SYSTEM = (
     "dynamic programming, etc.), else REJECT: <short reason>. Be strict."
 )
 
+CRITIC_SYSTEM = (
+    "You are a strict reviewer. Given the artifact and checklist, reply with "
+    "exactly one line: PASS if it satisfies every checklist item, else "
+    "ISSUES: <short comma-separated list>. Be strict but fair."
+)
+
+PLAN_CHECKLIST = (
+    "1. States one approach. 2. States time/space complexity. "
+    "3. Has numbered implementation steps. "
+    "4. Ends with a SIGNATURE: def solve(...) contract line."
+)
+
+CODE_CHECKLIST = (
+    "1. Defines the contracted solve function with exact parameters. "
+    "2. Implements the planned approach (no placeholder logic). "
+    "3. Handles edge cases (empty input, single element). "
+    "4. Imports only allowed stdlib modules."
+)
+
+TESTS_CHECKLIST = (
+    "1. At least 3 tests covering base and edge cases. "
+    "2. Every harness calls solve and prints the result. "
+    "3. Expected outputs are plausible for the problem."
+)
+
+
+def critique(kind: str, artifact: str, context: str = "") -> dict | None:
+    """Local-model review. Returns {passed, issues} or None if critic down.
+
+    The critic is advisory and fail-open: None means proceed unflagged.
+    """
+    from . import llms
+
+    checklists = {"plan": PLAN_CHECKLIST, "code": CODE_CHECKLIST, "tests": TESTS_CHECKLIST}
+    user = f"Checklist:\n{checklists[kind]}\n\nContext:\n{context[:2000]}\n\nArtifact:\n{artifact[:4000]}"
+    try:
+        msg = llms.get_critic().invoke([("system", CRITIC_SYSTEM), ("human", user)])
+        content = msg.content if isinstance(msg.content, str) else ""
+        verdict = strip_think(content).strip()
+    except Exception:
+        return None
+    if verdict.upper().startswith("PASS"):
+        return {"passed": True, "issues": ""}
+    if verdict.upper().startswith("ISSUES:"):
+        return {"passed": False, "issues": verdict[len("ISSUES:"):].strip()[:500]}
+    return None
+
 
 def strip_think(text: str) -> str:
     """Remove <think>...</think> reasoning traces (some models inline them)."""

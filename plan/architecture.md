@@ -64,6 +64,8 @@ graph TD
 
 Resilience: small 90s / heavy 180s client timeouts; heavy→small fallback sets
 `fallback_used` (planner, coder incl. repair); planner→[tests,coder] fan-out is parallel.
+Critics: `critique()` on gemma4 (512 tokens) reviews plan/code/tests with max 1
+regen each; `critic_overruled` set when proceeding with open issues.
 
 ## CLI + Output
 - `PYTHONPATH=src uv run python -m cli --problem "..." | --file p.md | stdin pipe`.

@@ -38,4 +38,5 @@ class AgentState(TypedDict, total=False):
     fallback_used: bool
     rejected: bool
     rejection_reason: str
+    critic_overruled: bool
     output_path: str

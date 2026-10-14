@@ -7,6 +7,7 @@ def _no_llm(monkeypatch):
 
     monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
 
 
 def test_prompt_parsers():
@@ -97,6 +98,80 @@ def test_evaluator_replaces_results():
     second = evaluator({"code": code, "test_cases": tests, "execution_results": merged["execution_results"]})
     merged.update(second)
     assert len(merged["execution_results"]) == 1  # replace, not append (Bug 3)
+
+
+def test_critique_parsing(monkeypatch):
+    import agent.llms as llms
+    import agent.prompts as prompts
+
+    class Msg:
+        def __init__(self, content):
+            self.content = content
+
+    monkeypatch.setattr(llms, "get_critic", lambda: type("M", (), {"invoke": lambda self, _: Msg("PASS")})())
+    assert prompts.critique("plan", "x") == {"passed": True, "issues": ""}
+
+    monkeypatch.setattr(llms, "get_critic", lambda: type("M", (), {"invoke": lambda self, _: Msg("ISSUES: no signature")})())
+    assert prompts.critique("plan", "x") == {"passed": False, "issues": "no signature"}
+
+    monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    assert prompts.critique("plan", "x") is None
+
+
+def test_planner_critic_regen_and_overruled(monkeypatch):
+    import agent.nodes as nodes
+
+    calls = []
+
+    def fake_gen(user, system):
+        calls.append(user)
+        if len(calls) == 1:
+            return ("1. approach X", False)
+        return ("1. approach Y\nSIGNATURE: def solve(a)", False)
+
+    verdicts = iter([{"passed": False, "issues": "missing signature"}, {"passed": True, "issues": ""}])
+    monkeypatch.setattr(nodes, "try_invoke_with_fallback", fake_gen)
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
+    out = nodes.planner({"clarified_intent": "sum two ints, return total"})
+    assert out.get("function_signature") == "def solve(a)"
+    assert "critic_overruled" not in out
+    assert len(calls) == 2
+
+    verdicts = iter([{"passed": False, "issues": "bad"}, {"passed": False, "issues": "still bad"}])
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
+    out = nodes.planner({"clarified_intent": "sum two ints, return total"})
+    assert out["critic_overruled"] is True
+
+
+def test_coder_critic_regen(monkeypatch):
+    import agent.nodes as nodes
+
+    v1 = "def solve(a):\n    return a\n"
+    v2 = "def solve(a):\n    return a if a else 0\n"
+    gen_calls = []
+
+    def fake_gen(user, system):
+        gen_calls.append(system)
+        return (v1 if len(gen_calls) == 1 else v2, False)
+
+    verdicts = iter([{"passed": False, "issues": "no edge handling"}, {"passed": True, "issues": ""}])
+    monkeypatch.setattr(nodes, "try_invoke_with_fallback", fake_gen)
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
+    out = nodes.coder({"clarified_intent": "return a", "plan_steps": [], "function_signature": "def solve(a)"})
+    assert "if a else" in out["code"]
+    assert "critic_overruled" not in out
+
+
+def test_testgen_critic_regen(monkeypatch):
+    import agent.nodes as nodes
+
+    good = '[{"id": "t1", "harness": "print(solve(1))", "expected": "1"}, {"id": "t2", "harness": "print(solve(2))", "expected": "2"}, {"id": "t3", "harness": "print(solve(3))", "expected": "3"}]'
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: good)
+    verdicts = iter([{"passed": False, "issues": "thin"}, {"passed": True, "issues": ""}])
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    assert len(out["test_cases"]) == 3
+    assert "critic_overruled" not in out
 
 
 def test_heavy_fallback_flag(monkeypatch):

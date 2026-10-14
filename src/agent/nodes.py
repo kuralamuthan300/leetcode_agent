@@ -14,6 +14,7 @@ from .prompts import (
     PLANNER_SYSTEM,
     TESTGEN_SYSTEM,
     code_defines_signature,
+    critique,
     extract_code,
     extract_json_array,
     extract_signature,
@@ -186,18 +187,31 @@ def planner(state: dict) -> dict:
     if feedback:
         user += f"\n\nPrevious attempt failed with this feedback — address it:\n{feedback[:1000]}"
     text, fell_back = try_invoke_with_fallback(user, PLANNER_SYSTEM)
-    if text:
-        out: dict = {"plan_steps": _parse_plan(text)}
-        sig = extract_signature(text)
-        if sig:
-            out["function_signature"] = sig
-        if fell_back:
-            out["fallback_used"] = True
-        return out
-    base = [f"Solve: {intent[:120]}"]
-    if feedback:
-        base.append(f"Address feedback: {feedback[:500]}")
-    return {"plan_steps": base}
+    if not text:
+        base = [f"Solve: {intent[:120]}"]
+        if feedback:
+            base.append(f"Address feedback: {feedback[:500]}")
+        return {"plan_steps": base}
+    overruled = False
+    verdict = critique("plan", text, intent)
+    if verdict and not verdict["passed"]:
+        text2, fb2 = try_invoke_with_fallback(
+            user + f"\n\nReviewer issues (fix all):\n{verdict['issues']}", PLANNER_SYSTEM)
+        if text2:
+            text, fell_back = text2, fell_back or fb2
+            verdict2 = critique("plan", text, intent)
+            overruled = bool(verdict2 and not verdict2["passed"])
+        else:
+            overruled = True
+    out: dict = {"plan_steps": _parse_plan(text)}
+    sig = extract_signature(text)
+    if sig:
+        out["function_signature"] = sig
+    if fell_back:
+        out["fallback_used"] = True
+    if overruled:
+        out["critic_overruled"] = True
+    return out
 
 
 def _valid_test(item: object, sig: str | None = None) -> dict | None:
@@ -233,7 +247,27 @@ def test_case_gen(state: dict) -> dict:
     if not parsed:
         return {"test_cases": []}
     tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None))]
-    return {"test_cases": tests}
+    overruled = False
+    if tests:
+        import json as _json
+
+        verdict = critique("tests", _json.dumps(tests)[:4000], intent)
+        if verdict and not verdict["passed"]:
+            text2 = try_invoke("small", user + f"\n\nReviewer issues (fix all):\n{verdict['issues']}", TESTGEN_SYSTEM)
+            if text2:
+                parsed2 = extract_json_array(text2)
+                if parsed2:
+                    tests = [t for item in parsed2[:MAX_TESTS] if (t := _valid_test(item, sig or None))]
+                    verdict2 = critique("tests", _json.dumps(tests)[:4000], intent)
+                    overruled = bool(verdict2 and not verdict2["passed"])
+                else:
+                    overruled = True
+            else:
+                overruled = True
+    out: dict = {"test_cases": tests}
+    if overruled:
+        out["critic_overruled"] = True
+    return out
 
 
 def _smoke(code: str, sig: str = "") -> tuple[dict, dict]:
@@ -273,6 +307,7 @@ def coder(state: dict) -> dict:
 
     text, fell_back = try_invoke_with_fallback(user, CODER_SYSTEM)
     code = extract_code(text) if text else "# TODO: implement solution\n"
+    repaired = False
 
     if sig and text and not code_defines_signature(code, sig):
         correction = (
@@ -283,9 +318,10 @@ def coder(state: dict) -> dict:
         fell_back = fell_back or repair_fell_back
         if fixed:
             code = extract_code(fixed)
+        repaired = True
     smoke, report = _smoke(code, sig)
 
-    if smoke["error"] and not smoke["error"].startswith("blocked:") and text:
+    if smoke["error"] and not smoke["error"].startswith("blocked:") and text and not repaired:
         repair_user = (
             f"Problem:\n{intent}\n\nFailing code:\n{code[:4000]}"
             f"\n\nSmoke error:\n{smoke['error'][:1000]}"
@@ -295,10 +331,34 @@ def coder(state: dict) -> dict:
         if fixed:
             code = extract_code(fixed)
             smoke, report = _smoke(code, sig)
+        repaired = True
+
+    overruled = False
+    if text and "def solve" in code:
+        verdict = critique("code", code, f"{intent}\n\nPlan:\n{plan}")
+        if verdict and not verdict["passed"]:
+            if not repaired:
+                regen_user = (
+                    f"Problem:\n{intent}\n\nYour code:\n{code[:4000]}"
+                    f"\n\nReviewer issues (fix all):\n{verdict['issues']}"
+                )
+                fixed, repair_fell_back = try_invoke_with_fallback(regen_user, CODER_REPAIR_SYSTEM)
+                fell_back = fell_back or repair_fell_back
+                if fixed:
+                    code = extract_code(fixed)
+                    smoke, report = _smoke(code, sig)
+                    verdict2 = critique("code", code, intent)
+                    overruled = bool(verdict2 and not verdict2["passed"])
+                else:
+                    overruled = True
+            else:
+                overruled = True
 
     out: dict = {"code": code, "coder_smoke": smoke, "guardrail_report": report}
     if fell_back:
         out["fallback_used"] = True
+    if overruled:
+        out["critic_overruled"] = True
     return out
 
 
@@ -369,6 +429,7 @@ def run_reporter(state: dict) -> dict:
         "coder_smoke": state.get("coder_smoke", {}),
         "guardrail_report": state.get("guardrail_report", {}),
         "fallback_used": state.get("fallback_used", False),
+        "critic_overruled": state.get("critic_overruled", False),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
     }

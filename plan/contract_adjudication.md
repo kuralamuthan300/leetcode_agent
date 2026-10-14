@@ -27,12 +27,12 @@ eval failures adjudicate TEST_WRONG vs CODE_WRONG with targeted repair.
 - `blame` recorded per failure in `execution_results` (+ surfaced in feedback).
 - Verified live (subtraction bug correctly blamed on code).
 
-## Step 5 — Targeted repair routing
-- `evaluator()`: TEST_WRONG → new `repair_test()` sub-step (regen that test
-  only, code untouched); CODE_WRONG → existing coder path via planner feedback
-  carrying `error_class` + blame; unsure/flip-flop → escalate to planner with
-  both artifacts. Respect the existing 3-iteration budget; contract violations
-  never trigger code repair.
+## Step 5 — Targeted repair routing [done]
+- `repair_test()` in `nodes.py`: blame=test cases regen'd in-evaluator
+  (same id, validated, re-run); code untouched on that path.
+- Still-failing → blame unknown + `[escalate]` note for planner; invalid regen
+  keeps the original failure. CODE_WRONG flows via existing feedback.
+- `repaired: bool` per result; 3-iteration budget unchanged.
 
 ## Step 6 — State, reporter, docs, E2E
 - State: `arg_spec`; reporter JSON includes it (+ `blame` per result).

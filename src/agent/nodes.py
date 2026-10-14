@@ -20,6 +20,7 @@ from .prompts import (
     extract_contract,
     extract_json_array,
     harness_matches,
+    strip_think,
     try_invoke,
     try_invoke_with_fallback,
 )
@@ -321,6 +322,36 @@ def test_case_gen(state: dict) -> dict:
     return out
 
 
+def repair_test(problem: str, sig: str, arg_spec: list, code: str, test: dict) -> dict | None:
+    """Regenerate a single blame=test case; None if the fix is invalid."""
+    user = (
+        f"Problem:\n{problem[:2000]}\n\n{_contract_brief(sig, arg_spec, '')}\n\n"
+        f"Reference code:\n{code[:2000]}\n\n"
+        f"This test was judged wrong and must be fixed (keep the same id):\n"
+        f"{test['test_id']}: harness={test['harness'][:500]} expected={test['expected'][:500]!r}"
+    )
+    text = try_invoke("small", user, TESTGEN_SYSTEM)
+    if not text:
+        return None
+    import json as _json
+
+    parsed = extract_json_array(text)
+    candidates = parsed if parsed else None
+    if candidates is None:
+        try:
+            one = _json.loads(strip_think(text))
+            candidates = [one] if isinstance(one, dict) else None
+        except (ValueError, AttributeError):
+            candidates = None
+    if not candidates:
+        return None
+    fixed = _valid_test(candidates[0], sig or None, arg_spec or None)
+    if not fixed:
+        return None
+    fixed["id"] = test["test_id"]
+    return fixed
+
+
 def _smoke(code: str, sig: str = "") -> tuple[dict, dict]:
     from .errors import dummy_args, is_call_failure
     from .tools import guardrail_report as gate
@@ -450,12 +481,37 @@ def evaluator(state: dict) -> dict:
             "expected": t["expected"].strip()[:2000],
             "error": r["error"][:2000],
             "blame": "none",
+            "repaired": False,
         }
         if not ok:
             verdict = adjudicate(problem, sig, arg_spec, code, entry)
             entry["blame"] = verdict["blame"]
             entry["error"] = (f"[blame:{verdict['blame']}] {verdict['reason']} " + entry["error"])[:2000]
         results.append(entry)
+    for entry in results:
+        if entry["passed"] or entry["blame"] != "test":
+            continue
+        fixed = repair_test(problem, sig, arg_spec, code, {
+            "test_id": entry["test_id"],
+            "harness": next(t["harness"] for t in tests if t["id"] == entry["test_id"]),
+            "expected": entry["expected"],
+        })
+        if not fixed:
+            continue
+        r = run_python(code, harness=fixed["harness"])
+        ok = not r["error"] and r["stdout"].strip() == fixed["expected"].strip()
+        entry.update({
+            "passed": ok,
+            "actual": r["stdout"].strip()[:2000],
+            "expected": fixed["expected"].strip()[:2000],
+            "error": r["error"][:2000],
+            "repaired": True,
+        })
+        if ok:
+            entry["blame"] = "none"
+        else:
+            entry["blame"] = "unknown"
+            entry["error"] = ("[escalate] repaired test still fails; needs planner review. " + entry["error"])[:2000]
     passed_count = sum(1 for r in results if r["passed"])
     if not tests:
         ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated", "error_class": "empty"}

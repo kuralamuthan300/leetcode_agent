@@ -56,3 +56,61 @@ def test_evaluator_records_blame():
     by_id = {r["test_id"]: r for r in out["execution_results"]}
     assert by_id["t1"]["blame"] == "none"
     assert by_id["t2"]["blame"] in ("code", "unknown")  # offline judge unavailable
+
+
+def test_repair_test_only_path(monkeypatch):
+    import agent.nodes as nodes
+
+    fixed_json = '[{"id": "t1", "harness": "print(solve(1, 2))", "expected": "3"}]'
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: fixed_json)
+    code = "def solve(a, b):\n    return a + b\n"
+    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    out = nodes.evaluator({
+        "code": code,
+        "test_cases": tests,
+        "function_signature": "def solve(a, b)",
+        "clarified_intent": "add",
+    })
+    entry = out["execution_results"][0]
+    assert entry["repaired"] is True
+    assert entry["passed"] is True
+    assert entry["blame"] == "none"
+    assert out["eval"]["passed"] is True
+
+
+def test_repair_invalid_keeps_failure(monkeypatch):
+    import agent.nodes as nodes
+
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: "not json at all {{{")
+    code = "def solve(a, b):\n    return a + b\n"
+    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    out = nodes.evaluator({
+        "code": code,
+        "test_cases": tests,
+        "function_signature": "def solve(a, b)",
+        "clarified_intent": "add",
+    })
+    entry = out["execution_results"][0]
+    assert entry["passed"] is False
+    assert entry["repaired"] is False
+    assert entry["blame"] == "test"
+
+
+def test_repair_still_failing_escalates(monkeypatch):
+    import agent.nodes as nodes
+
+    bad_json = '[{"id": "t1", "harness": "print(solve(1, 1))", "expected": "999"}]'
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: bad_json)
+    code = "def solve(a, b):\n    return a + b\n"
+    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    out = nodes.evaluator({
+        "code": code,
+        "test_cases": tests,
+        "function_signature": "def solve(a, b)",
+        "clarified_intent": "add",
+    })
+    entry = out["execution_results"][0]
+    assert entry["repaired"] is True
+    assert entry["passed"] is False
+    assert entry["blame"] == "unknown"
+    assert "escalate" in entry["error"]

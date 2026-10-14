@@ -16,10 +16,10 @@ eval failures adjudicate TEST_WRONG vs CODE_WRONG with targeted repair.
 - `_valid_test()` drops out-of-range literal args; non-literals skip (no false drops).
 - Wired through `test_case_gen` (both paths).
 
-## Step 3 — Testgen consumes contract
-- `test_case_gen()` prompt gets problem + contract + "values strictly within
-  ranges" + mandatory boundary coverage (min/max/empty-if-allowed).
-- Regen path reuses the same validation. No graph change.
+## Step 3 — Testgen consumes contract [done]
+- Prompt gets problem + rendered contract + "strictly within ranges" +
+  boundary coverage (min/max/empty-if-allowed); `returns_spec` stored.
+- Regen path shares user + validation. No graph change.
 
 ## Step 4 — Blame adjudicator
 - New `adjudicate(problem, contract, code, failing_test)` in `prompts.py`:

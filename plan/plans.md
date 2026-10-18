@@ -1,7 +1,7 @@
 # Execution Plan — LangGraph DSA Solver (steps 1–9)
 
-Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-13
-Progress: Steps 1–15 complete on `plan/plan.md` (72 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
+Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-18
+Progress: Steps 1–18 complete on `plan/plan.md` (101 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
 
 ## Step 1 — IntentClarifier LLM
 Replace heuristic-only with `deepseek-r1:1.5b` rewrite pass; keep max-3 self-loop
@@ -85,4 +85,47 @@ with deterministic blame — retries on code failures, escalates when the test i
 at fault. Evaluator re-runs the full matrix (visible + holdout) as the only
 gate, computes dominant `eval.blame`, and routes test-blame → tests,
 code/unknown-blame → planner. Full plan: `plan/plan.md`.
+
+## Step 16 — Live terminal output (code + test I/O) [done]
+`cli.py` renders rich panels during the run: the plan + contract
+(signature/args/returns) after `planner`, a code panel on every coder attempt, a
+test-case table (holdout labelled) on `tests`, and input/expected/actual/blame
+result tables for the coder self-check (`coder_checks`) and the evaluator. On by
+default; `--quiet` restores status-lines-only, `--verbose` still dumps the full
+final code/tests. `ExecutionResult` entries now carry `harness`; state gains
+`coder_checks`. Long code/values are clipped for readability. Full plan:
+`plan/plan.md`.
+
+## Step 17 — During-node narrator (spinner + live timer) [done]
+While a node runs (LLM calls block 90-180s) `cli.py` shows a bottom-line spinner
+with rotating, node-aware phrases plus a live seconds counter (`planner:
+thinking…  (14s)`). The graph is drained by a worker thread (`_produce`) into a
+`queue.Queue`; the main thread runs `rich.live.Live(get_renderable=...)` — a
+persistent `Spinner` whose text is recomputed ~8×/s on the refresh thread — and
+predicts the next node with `_next_node` (reusing the graph routers); the phrase
+rotates every `_NARRATION_INTERVAL = 3s`. Every status line also ends with that
+node's duration (`✓ plan (3 steps) · 12.4s`), in all modes. The spinner/timer is
+shown only when panels are on and stdout is a TTY, so `--quiet`/piped runs stay
+clean apart from the duration suffix. Verify: `PYTHONPATH=src uv run pytest -q
+tests/test_cli.py` (`_next_node`, `_narrator` rotation/seconds, duration suffix,
+forced live-path + error-path tests).
+
+## Step 18 — Gatherer modes + batch dataset driver [done]
+Two explicit gatherer modes. **interactive** (default, unchanged) shows the
+understanding before the planner; **quiet** (`--gather-mode quiet`, default for
+piped/headless) validates the requirement in a single pass with one
+`QUIET_GATHER_SYSTEM` verdict (strict JSON) and never prompts — hard gates first
+(language/scope/truncation→`incomplete`), then abort if `workable=false` or a
+blocking ambiguity exists, else proceed (flagging `assumed` when the model listed
+assumptions). `_route_gather` short-circuits quiet to the planner so it cannot
+loop. Classified outcomes (`status` ok/assumed/aborted/`infra_error`, a pinned
+`rejection_class` enum + `workability.rubric_version`) give headless runs a
+stable JSON schema for an LLM-as-judge; a transport failure is `infra_error`
+(bounded retry), never `rejected`. Adds the batch driver
+`--problems-file problems.jsonl` (implies quiet) writing
+`output/<batch_id>/<id>.json` + `summary.json` (`status_counts`,
+`rejection_class_counts`, `yield`), continuing past per-row infra failures; exit
+codes `0` ok/assumed/aborted, `1` infra, `2` bad input. Full plan:
+`plan/plan.md` (Increment 4). Verify: `PYTHONPATH=src uv run pytest -q
+tests/test_intent.py tests/test_cli.py`.
 

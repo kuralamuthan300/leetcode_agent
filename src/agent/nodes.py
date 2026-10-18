@@ -99,43 +99,130 @@ def _confirm_with_user(understanding: str, assumptions: list[str], questions: li
     return answer, False
 
 
+def _workability(verdict: str, reason: str = "", assumptions: list | None = None,
+                 blocking: list | None = None, confidence: str = "", cls: str = "") -> dict:
+    """Normalized workability record (stable schema for the run JSON / judge)."""
+    from .prompts import RUBRIC_VERSION
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "assumptions": assumptions or [],
+        "blocking_ambiguities": blocking or [],
+        "confidence": confidence,
+        "rejection_class": cls,
+        "rubric_version": RUBRIC_VERSION,
+    }
+
+
+def _abort(req: str, n: int, mode: str, cls: str, reason: str) -> dict:
+    """Hard abort: keep the reason, route to the reporter, never guess."""
+    return {
+        "clarified_intent": req,
+        "requirement": req,
+        "gather_mode": mode,
+        "intent_iterations": n,
+        "intent_clear": False,
+        "rejected": True,
+        "rejection_reason": reason,
+        "rejection_class": cls,
+        "status": "aborted",
+        "workability": _workability("aborted", reason, cls=cls, confidence="high"),
+    }
+
+
+def _quiet_gather(req: str, n: int) -> dict:
+    """Single-pass validation: one verdict call, then proceed or abort. Never asks."""
+    from .prompts import QUIET_GATHER_SYSTEM, REJECTION_CLASSES, extract_json_object, try_invoke
+
+    if is_truncated(req):
+        return _abort(req, n, "quiet", "incomplete",
+                      "requirement looks empty or cut off; quiet mode cannot ask for the rest")
+
+    raw = try_invoke("small", f"Requirement:\n{req}", QUIET_GATHER_SYSTEM, retries=1)
+    data = extract_json_object(raw) if raw else None
+    if not isinstance(data, dict):
+        # A transport/model failure is NOT a rejection — surface it as infra_error
+        # so it can be retried/excluded rather than counted as a bad requirement.
+        reason = "workability check unavailable (model error)"
+        return {
+            "clarified_intent": req,
+            "requirement": req,
+            "gather_mode": "quiet",
+            "intent_iterations": n,
+            "intent_clear": False,
+            "rejected": True,
+            "rejection_reason": reason,
+            "rejection_class": "infra",
+            "status": "infra_error",
+            "workability": _workability("unavailable", reason, confidence="low", cls="infra"),
+        }
+
+    workable = bool(data.get("workable"))
+    blocking = [str(x).strip() for x in (data.get("blocking_ambiguities") or []) if str(x).strip()]
+    assumptions = [str(x).strip() for x in (data.get("assumptions") or []) if str(x).strip()]
+    reason = str(data.get("reason") or "").strip()
+    confidence = str(data.get("confidence") or "").strip().lower() or "medium"
+    cls = str(data.get("rejection_class") or "").strip()
+    intent = str(data.get("clarified_intent") or "").strip() or req
+
+    if not workable or blocking:
+        if cls not in REJECTION_CLASSES:
+            cls = "under_specified"
+        detail = reason or ("blocking ambiguity: " + "; ".join(blocking[:3])) or "requirement not workable as given"
+        return {
+            "clarified_intent": intent,
+            "requirement": req,
+            "gather_mode": "quiet",
+            "intent_iterations": n,
+            "intent_clear": False,
+            "rejected": True,
+            "rejection_reason": detail[:300],
+            "rejection_class": cls,
+            "status": "aborted",
+            "workability": _workability("aborted", detail, assumptions, blocking, confidence, cls),
+        }
+
+    assumed = bool(assumptions)
+    return {
+        "clarified_intent": intent,
+        "requirement": req,
+        "gather_mode": "quiet",
+        "intent_iterations": n,
+        "intent_clear": not assumed,
+        "confirmed": False,
+        "assumed": assumed,
+        "rejected": False,
+        "rejection_class": "",
+        "status": "assumed" if assumed else "ok",
+        "workability": _workability("assumed" if assumed else "ok", reason, assumptions, [], confidence),
+    }
+
+
 def requirement_gatherer(state: dict) -> dict:
     import sys
 
     from .prompts import SCOPE_SYSTEM, try_invoke
-    from .tools.guardrail import check_language, check_scope, is_truncated
+    from .tools.guardrail import check_language, check_scope
 
+    mode = state.get("gather_mode") or "interactive"
     n = state.get("intent_iterations", 0) + 1
     req = state.get("requirement", "").strip()
     lang = check_language(req)
     if not lang["allowed"]:
-        return {
-            "clarified_intent": req,
-            "intent_iterations": n,
-            "intent_clear": False,
-            "rejected": True,
-            "rejection_reason": lang["reason"] + " — this agent solves in Python only",
-        }
+        return _abort(req, n, mode, "language", lang["reason"] + " — this agent solves in Python only")
     scope = check_scope(req)
     if scope["allowed"] is False:
-        return {
-            "clarified_intent": req,
-            "intent_iterations": n,
-            "intent_clear": False,
-            "rejected": True,
-            "rejection_reason": scope["reason"] + " — this agent solves DSA coding tasks only",
-        }
+        return _abort(req, n, mode, "scope", scope["reason"] + " — this agent solves DSA coding tasks only")
     if scope["allowed"] is None:
         verdict = try_invoke("small", f"Request:\n{req}", SCOPE_SYSTEM)
         if not verdict or not verdict.strip().upper().startswith("ALLOW"):
-            return {
-                "clarified_intent": req,
-                "intent_iterations": n,
-                "intent_clear": False,
-                "rejected": True,
-                "rejection_reason": (verdict or "scope unclear").strip()[:200]
-                + " — this agent solves DSA coding tasks only",
-            }
+            return _abort(req, n, mode, "scope",
+                          (verdict or "scope unclear").strip()[:200] + " — this agent solves DSA coding tasks only")
+
+    if mode == "quiet":
+        return _quiet_gather(req, n)
+
     prior = state.get("clarified_intent", "") or req
     if n == 1:
         user = f"Requirement:\n{req}"
@@ -166,10 +253,15 @@ def requirement_gatherer(state: dict) -> dict:
     return {
         "clarified_intent": text,
         "requirement": req,
+        "gather_mode": mode,
         "intent_iterations": n,
         "intent_clear": is_intent_clear(text) and not assumed,
         "confirmed": confirmed,
         "assumed": assumed,
+        "rejected": False,
+        "rejection_class": "",
+        "status": "assumed" if assumed else "ok",
+        "workability": _workability("assumed" if assumed else "ok", confidence="low" if assumed else "medium"),
     }
 
 
@@ -392,6 +484,7 @@ def run_matrix(
         ok = not r["error"] and r["stdout"].strip() == t["expected"].strip()
         entry = {
             "test_id": t["id"],
+            "harness": t["harness"][:2000],
             "passed": ok,
             "actual": r["stdout"].strip()[:2000],
             "expected": t["expected"].strip()[:2000],
@@ -519,8 +612,10 @@ def coder(state: dict) -> dict:
     status = "pass"
     coder_fb = ""
     inner = state.get("coder_iterations", 0)
+    checks: list[dict] = []
     if visible:
         results, _ = run_matrix(code, visible, sig, arg_spec, intent, adjudicate_failures=False)
+        checks = results
         failing = [r for r in results if not r["passed"]]
         if failing:
             code_fails = [r for r in failing if r["blame"] != "test"]
@@ -537,6 +632,7 @@ def coder(state: dict) -> dict:
         "coder_smoke": smoke,
         "guardrail_report": report,
         "coder_status": status,
+        "coder_checks": checks,
     }
     if status == "retry":
         out["coder_iterations"] = inner + 1
@@ -646,6 +742,10 @@ def run_reporter(state: dict) -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "models": {"heavy": HEAVY_MODEL, "small": SMALL_MODEL},
         "requirement": state.get("requirement", ""),
+        "gather_mode": state.get("gather_mode", "interactive"),
+        "status": state.get("status", "ok"),
+        "rejection_class": state.get("rejection_class", ""),
+        "workability": state.get("workability", {}),
         "rejected": state.get("rejected", False),
         "rejection_reason": state.get("rejection_reason", ""),
         "clarified_intent": state.get("clarified_intent", ""),
@@ -661,6 +761,7 @@ def run_reporter(state: dict) -> dict:
         "holdout_tests": state.get("holdout_tests", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),
+        "coder_checks": state.get("coder_checks", []),
         "coder_iterations": state.get("coder_iterations", 0),
         "guardrail_report": state.get("guardrail_report", {}),
         "fallback_used": state.get("fallback_used", False),
@@ -668,7 +769,7 @@ def run_reporter(state: dict) -> dict:
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
     }
-    path = Path("output") / f"{run_id}.json"
+    path = Path(state.get("out_dir") or "output") / f"{run_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2))
     return {"output_path": str(path)}

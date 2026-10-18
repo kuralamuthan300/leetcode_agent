@@ -20,6 +20,9 @@ MAX_ITERATIONS = 3
 def _route_gather(state: AgentState) -> str:
     if state.get("rejected"):
         return "reporter"
+    if state.get("gather_mode") == "quiet":
+        # Quiet mode is a single pass: never re-ask the user, always move on.
+        return "planner"
     if state.get("intent_clear") or state.get("assumed"):
         return "planner"
     if state.get("intent_iterations", 0) >= MAX_INTENT_ITERATIONS:

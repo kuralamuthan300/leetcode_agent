@@ -4,6 +4,7 @@ from typing import Any, TypedDict
 
 class ExecutionResult(TypedDict):
     test_id: str
+    harness: str
     passed: bool
     actual: str
     expected: str
@@ -24,6 +25,11 @@ class EvalReport(TypedDict):
 class AgentState(TypedDict, total=False):
     run_id: str
     requirement: str
+    gather_mode: str  # interactive | quiet
+    status: str  # ok | assumed | aborted | infra_error
+    rejection_class: str  # scope | language | incomplete | under_specified | ... | infra
+    workability: dict  # quiet-mode verdict (verdict, assumptions, blocking_ambiguities, ...)
+    out_dir: str  # output root (batch runs override to output/<batch_id>)
     clarified_intent: str
     intent_iterations: int
     intent_clear: bool
@@ -37,6 +43,7 @@ class AgentState(TypedDict, total=False):
     holdout_tests: list[dict[str, Any]]  # evaluator-only; hidden from the coder
     code: str
     coder_smoke: dict[str, str]
+    coder_checks: list[ExecutionResult]  # coder self-loop per-test results
     coder_iterations: int  # inner-loop retries used this outer round
     coder_status: str  # pass | retry | escalate
     guardrail_report: dict

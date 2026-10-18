@@ -47,6 +47,7 @@ def test_coder_fallback_smoke(tmp_path, monkeypatch):
     assert out["code"].startswith("# TODO")
     assert out["coder_smoke"]["error"] == ""
     assert out["guardrail_report"]["allowed"] is True
+    assert out["coder_checks"] == []
 
 
 def test_evaluator_matrix_and_iterations(tmp_path, monkeypatch):
@@ -375,6 +376,8 @@ def test_coder_inner_loop_retries_on_code_failure(monkeypatch):
     assert out["coder_status"] == "retry"
     assert out["coder_iterations"] == 1
     assert "t1" in out["feedback"]
+    assert out["coder_checks"][0]["test_id"] == "t1"
+    assert out["coder_checks"][0]["harness"] == "print(solve(1))"
 
 
 def test_coder_escalates_when_all_failures_blame_test(monkeypatch):

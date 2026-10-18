@@ -7,6 +7,10 @@ def test_reporter_schema_complete(tmp_path, monkeypatch):
     state = {
         "run_id": "run_id_schema",
         "requirement": "r",
+        "gather_mode": "interactive",
+        "status": "ok",
+        "rejection_class": "",
+        "workability": {"verdict": "ok", "rubric_version": "1"},
         "rejected": False,
         "rejection_reason": "",
         "clarified_intent": "c",
@@ -22,6 +26,7 @@ def test_reporter_schema_complete(tmp_path, monkeypatch):
         "holdout_tests": [],
         "code": "def solve(a):\n    return a\n",
         "coder_smoke": {"error": ""},
+        "coder_checks": [],
         "coder_iterations": 0,
         "guardrail_report": {"allowed": True},
         "fallback_used": False,

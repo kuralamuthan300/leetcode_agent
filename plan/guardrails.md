@@ -1,6 +1,6 @@
 # Guardrails — Coder Sandbox Security
 
-Updated: 2026-10-13 | Status: implemented on `task/step-1-5` (`tools/guardrail.py`, gated `run_python`, `guardrail_report` in state/output, `tests/test_guardrails.py` green).
+Updated: 2026-10-18 | Status: implemented (`tools/guardrail.py`, gated `run_python`, `guardrail_report` in state/output, `tests/test_guardrails.py` green).
 Enforcement: fail-closed (blocked code never executes).
 
 ## Threat model
@@ -24,6 +24,14 @@ dynamic programming, …) → allow; non-coding markers (essay, poem, summarize,
 weather, …) → `rejected`. Gray zone → one small-LLM verdict (`SCOPE_SYSTEM`);
 LLM failure rejects (fail-closed). Neutral-but-vague coding asks go to the
 classifier, never silently through.
+
+## 0c. Quiet-mode workability gate (entry, quiet only)
+In quiet mode (`--gather-mode quiet`, default when piped/headless) the gatherer
+never prompts: after 0a/0b and a truncation check (`incomplete`) it makes one
+`QUIET_GATHER_SYSTEM` verdict call and either proceeds (`ok`/`assumed`) or aborts
+with a `rejection_class` (an answer-changing ambiguity ⇒ strict abort). A
+transport/model failure is `infra_error` (excluded from the dataset), never
+`rejected`, and each gather records `rejection_class` + `workability.rubric_version`.
 `check_language()` runs first in IntentClarifier: explicit non-Python
 languages (java/js/ts/sql/go/rust/…), strong code markers (public class,
 console.log, #include, …), or 2+ SQL keywords → `rejected: True`,

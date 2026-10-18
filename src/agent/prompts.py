@@ -71,6 +71,32 @@ SCOPE_SYSTEM = (
     "dynamic programming, etc.), else REJECT: <short reason>. Be strict."
 )
 
+# Quiet mode: validate + normalize in one call, without ever asking the user.
+QUIET_GATHER_SYSTEM = (
+    "You validate a data-structures & algorithms requirement WITHOUT asking the "
+    "user anything. Rewrite it as 2-4 crisp sentences covering goal, input format, "
+    "output format and constraints, then judge whether it is solvable as given. "
+    "Reply with ONLY a JSON object with exactly these keys: "
+    "clarified_intent (string), workable (boolean), reason (short string), "
+    "assumptions (array of strings you had to make), blocking_ambiguities (array "
+    "of strings — ONLY issues that would change the correct answer), confidence "
+    '("low"|"medium"|"high"), rejection_class (null when workable, else one of: '
+    "under_specified, nondeterministic, noncoding_task, undeliverable, "
+    "contradictory, debug_unprovided, unsandboxable). "
+    "Be strict: if an ambiguity changes the expected answer, set workable=false "
+    "and list it in blocking_ambiguities. Missing constraints or examples are "
+    "assumptions, NOT blocking. Reply with ONLY the JSON object."
+)
+
+# Rejection taxonomy. Hard gates own scope/language/incomplete; the rest come
+# from the quiet-mode verdict. `infra` is reserved for transport/model failures.
+REJECTION_CLASSES = (
+    "scope", "language", "incomplete", "noncoding_task", "undeliverable",
+    "under_specified", "nondeterministic", "contradictory", "debug_unprovided",
+    "unsandboxable",
+)
+RUBRIC_VERSION = "1"
+
 CRITIC_SYSTEM = (
     "You are a strict reviewer. Given the artifact and checklist, reply with "
     "exactly one line: PASS if it satisfies every checklist item, else "
@@ -188,6 +214,23 @@ def extract_json_array(text: str) -> list | None:
     except (json.JSONDecodeError, ValueError):
         return None
     return parsed if isinstance(parsed, list) else None
+
+
+def extract_json_object(text: str) -> dict | None:
+    """Parse a JSON object from raw or fenced LLM output; None if unparseable."""
+    text = strip_think(text)
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    candidate = m.group(1) if m else None
+    if candidate is None:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        candidate = text[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def try_invoke(kind: str, user: str, system: str, retries: int = 1) -> str | None:

@@ -18,6 +18,7 @@ class EvalReport(TypedDict):
     total: int
     feedback: str
     error_class: str  # none | logical | mechanical | empty
+    blame: str  # none | code | test (dominant blame across failures)
 
 
 class AgentState(TypedDict, total=False):
@@ -33,8 +34,11 @@ class AgentState(TypedDict, total=False):
     arg_spec: list[dict[str, str]]
     returns_spec: str
     test_cases: list[dict[str, Any]]
+    holdout_tests: list[dict[str, Any]]  # evaluator-only; hidden from the coder
     code: str
     coder_smoke: dict[str, str]
+    coder_iterations: int  # inner-loop retries used this outer round
+    coder_status: str  # pass | retry | escalate
     guardrail_report: dict
     execution_results: list[ExecutionResult]  # replace semantics: latest run only
     eval: EvalReport

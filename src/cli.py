@@ -54,6 +54,10 @@ def _line(node: str, patch: dict) -> str:
         return f"✓ tests ({len(patch.get('test_cases', []))}){tag}"
     if node == "coder":
         err = (patch.get("coder_smoke") or {}).get("error", "")
+        if patch.get("coder_status") == "retry":
+            return f"↻ code retry ({patch.get('coder_iterations', '?')}/3){tag}"
+        if patch.get("coder_status") == "escalate":
+            return f"↻ code escalate to evaluator{tag}"
         if not err:
             return f"✓ code (smoke ok){tag}"
         if err.startswith("blocked:"):
@@ -108,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         console.print("[bold]Code:[/bold]\n" + final.get("code", ""))
         for t in final.get("test_cases", []):
             console.print(f"[bold]{t['id']}:[/bold] {t['harness']} → {t['expected']}")
+        for t in final.get("holdout_tests", []):
+            console.print(f"[bold]{t['id']} (holdout):[/bold] {t['harness']} → {t['expected']}")
     return 0
 
 

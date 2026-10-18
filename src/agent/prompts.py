@@ -46,7 +46,8 @@ TESTGEN_SYSTEM = (
     "a JSON array of 3 to 5 test objects. Each object has exactly these keys: "
     "id (short string), harness (a Python snippet that calls `solve` and MUST "
     "use print to output the result), expected (the exact printed output as a "
-    "string, never null or an array). Example:\n"
+    "string, never null or an array). Derive `expected` by mentally executing "
+    "the harness step by step — never guess. Example:\n"
     '[{"id": "base", "harness": "print(solve([2, 7, 11, 15], 9))", '
     '"expected": "[0, 1]"}]\n'
     "Reply with ONLY the JSON array, no prose."
@@ -190,12 +191,14 @@ def extract_json_array(text: str) -> list | None:
 
 
 def try_invoke(kind: str, user: str, system: str, retries: int = 1) -> str | None:
-    """Invoke small/heavy model; retry on empty; None on persistent failure."""
+    """Invoke a model role (small / heavy / testgen); retry on empty; None on failure."""
     from . import llms
 
+    getters = {"small": llms.get_small, "heavy": llms.get_heavy, "testgen": llms.get_testgen}
+    getter = getters.get(kind, llms.get_small)
     for _ in range(retries + 1):
         try:
-            model = llms.get_small() if kind == "small" else llms.get_heavy()
+            model = getter()
             msg = model.invoke([("system", system), ("human", user)])
             content = msg.content if isinstance(msg.content, str) else ""
             if strip_think(content):

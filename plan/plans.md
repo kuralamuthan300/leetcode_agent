@@ -1,7 +1,7 @@
 # Execution Plan — LangGraph DSA Solver (steps 1–9)
 
 Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-13
-Progress: Steps 1–9 complete on `task/step-1-5` (18 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
+Progress: Steps 1–15 complete on `plan/plan.md` (72 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
 
 ## Step 1 — IntentClarifier LLM
 Replace heuristic-only with `deepseek-r1:1.5b` rewrite pass; keep max-3 self-loop
@@ -36,7 +36,8 @@ Verify: pass + fail-retry cases (`tests/test_nodes.py`).
 ## Step 7 — Resilience [done]
 Timeouts (small 90s, heavy 180s via Ollama client); heavy→small fallback with
 `fallback_used` flag in state/output (`try_invoke_with_fallback`, planner+coder);
-planner→[tests,coder] fan-out runs parallel in LangGraph.
+planner→[tests,coder] fan-out ran parallel in LangGraph *(later replaced by the
+sequential chain in Step 12)*.
 Verify: `test_heavy_fallback_flag`.
 
 ## Step 8 — Golden E2E [done]
@@ -63,6 +64,7 @@ critique→regen round each, `critic_overruled` flag on exhaust. Fail-open
 `planner → coder → tests → evaluator` (testgen sees final code + signature).
 Evaluator short-circuits on smoke failure (`error_class: mechanical`, no matrix
 run) so planner rectifies; `error_class` none/logical/empty otherwise.
+*(Ordering superseded by Step 15 — see below.)*
 
 ## Step 13 — State/reporter completeness [done]
 `function_signature`, `critic_overruled`, `error_class` verified in state +
@@ -73,3 +75,14 @@ Always-confirm on TTY (understanding + assumptions, Enter accepts, free-text
 corrects, max 2 rounds); disambiguation-only questions. Session memory
 (`session.py`, `--fresh`, `session_notes`) removed — every run starts fresh.
 Heavy model switched to `nemotron-3-super:cloud` (small/critic stay gemma4).
+
+## Step 15 — TDD ordering + coder self-loop + blame-aware routing [done]
+`planner → tests → coder → evaluator`: testgen derives from the CONTRACT (never
+the coder's code) on the reasoning model (`get_testgen`, `OLLAMA_TESTGEN*`),
+splits off a coder-hidden holdout test, and consumes `feedback`. Coder runs a
+bounded self-loop (≤3 retries, `coder_iterations`) against the visible tests
+with deterministic blame — retries on code failures, escalates when the test is
+at fault. Evaluator re-runs the full matrix (visible + holdout) as the only
+gate, computes dominant `eval.blame`, and routes test-blame → tests,
+code/unknown-blame → planner. Full plan: `plan/plan.md`.
+

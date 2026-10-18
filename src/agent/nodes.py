@@ -27,6 +27,8 @@ from .prompts import (
 
 MAX_INTENT_ITERATIONS = 3
 MAX_TESTS = 10
+MAX_CODER_RETRIES = 3  # inner self-loop retries before handing to the evaluator
+HOLDOUT_MIN_TESTS = 3  # only split off a holdout when this many tests exist
 
 _CLEAR_KEYWORDS = (
     "input",
@@ -261,12 +263,21 @@ def _contract_brief(sig: str, arg_spec: list, returns_spec: str = "") -> str:
     return "\n".join(lines)
 
 
+def _invoke_testgen(user: str, system: str) -> str | None:
+    """Reasoning testgen first, then plain heavy as a safety net."""
+    text = try_invoke("testgen", user, system)
+    if text:
+        return text
+    return try_invoke("heavy", user, system)
+
+
 def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
     arg_spec = state.get("arg_spec", [])
-    code = state.get("code", "")
+    feedback = state.get("feedback", "")
+    # TDD ordering: tests derive from the CONTRACT, never from the coder's code.
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}\n\n{_contract_brief(sig, arg_spec, state.get('returns_spec', ''))}"
     user += (
         "\nGenerate values strictly within these ranges. "
@@ -275,14 +286,15 @@ def test_case_gen(state: dict) -> dict:
     )
     if sig:
         user += f"\n\nCall the function exactly as contracted: {sig}"
-    if code and not code.strip().startswith("# TODO"):
-        user += f"\n\nReference implementation (match its calls):\n{code[:2000]}"
-    text = try_invoke("small", user, TESTGEN_SYSTEM)
+    if feedback:
+        user += f"\n\nPrevious tests were rejected — fix them:\n{feedback[:1000]}"
+    text = _invoke_testgen(user, TESTGEN_SYSTEM)
+    empty = {"test_cases": [], "holdout_tests": [], "coder_iterations": 0, "coder_status": ""}
     if not text:
-        return {"test_cases": []}
+        return dict(empty)
     parsed = extract_json_array(text)
     if not parsed:
-        return {"test_cases": []}
+        return dict(empty)
     tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None, arg_spec or None))]
     overruled = False
     if tests:
@@ -290,7 +302,7 @@ def test_case_gen(state: dict) -> dict:
 
         verdict = critique("tests", _json.dumps(tests)[:4000], intent)
         if verdict and not verdict["passed"]:
-            text2 = try_invoke("small", user + f"\n\nReviewer issues (fix all):\n{verdict['issues']}", TESTGEN_SYSTEM)
+            text2 = _invoke_testgen(user + f"\n\nReviewer issues (fix all):\n{verdict['issues']}", TESTGEN_SYSTEM)
             if text2:
                 parsed2 = extract_json_array(text2)
                 if parsed2:
@@ -301,7 +313,17 @@ def test_case_gen(state: dict) -> dict:
                     overruled = True
             else:
                 overruled = True
-    out: dict = {"test_cases": tests}
+    # Hold out one test the coder never sees so the evaluator can catch
+    # solutions that merely special-case the visible tests.
+    holdout: list[dict] = []
+    if len(tests) >= HOLDOUT_MIN_TESTS:
+        holdout = [tests.pop()]
+    out: dict = {
+        "test_cases": tests,
+        "holdout_tests": holdout,
+        "coder_iterations": 0,
+        "coder_status": "",
+    }
     if overruled:
         out["critic_overruled"] = True
     return out
@@ -337,6 +359,71 @@ def repair_test(problem: str, sig: str, arg_spec: list, code: str, test: dict) -
     return fixed
 
 
+def _deterministic_blame(harness: str, sig: str, arg_spec: list) -> str:
+    """Contract-only blame (no LLM): a violation points at the test."""
+    if sig and not harness_matches(harness, sig):
+        return "test"
+    if arg_spec and not args_in_range(arg_spec, harness):
+        return "test"
+    return "code"
+
+
+def run_matrix(
+    code: str,
+    tests: list[dict],
+    sig: str,
+    arg_spec: list,
+    problem: str,
+    *,
+    adjudicate_failures: bool = True,
+) -> tuple[list[dict], dict]:
+    """Run every harness against `code`; return (execution_results, summary).
+
+    `adjudicate_failures=True` (evaluator): full LLM blame on each failure.
+    `adjudicate_failures=False` (coder inner loop): deterministic blame only,
+    so the self-loop stays cheap and never second-guesses the evaluator.
+    """
+    from .prompts import adjudicate
+    from .tools.sandbox import run_python
+
+    results: list[dict] = []
+    for t in tests:
+        r = run_python(code, harness=t["harness"])
+        ok = not r["error"] and r["stdout"].strip() == t["expected"].strip()
+        entry = {
+            "test_id": t["id"],
+            "passed": ok,
+            "actual": r["stdout"].strip()[:2000],
+            "expected": t["expected"].strip()[:2000],
+            "error": r["error"][:2000],
+            "blame": "none",
+            "repaired": False,
+        }
+        if not ok:
+            if adjudicate_failures:
+                verdict = adjudicate(problem, sig, arg_spec, code, entry)
+                entry["blame"] = verdict["blame"]
+                entry["error"] = (f"[blame:{verdict['blame']}] {verdict['reason']} " + entry["error"])[:2000]
+            else:
+                entry["blame"] = _deterministic_blame(t["harness"], sig, arg_spec)
+        results.append(entry)
+    passed = sum(1 for r in results if r["passed"])
+    total = len(results)
+    summary = {"passed": bool(total) and passed == total, "passed_count": passed, "total": total}
+    return results, summary
+
+
+def _coder_feedback(code_fails: list[dict]) -> str:
+    """Actionable feedback for the coder's self-loop from code-blamed failures."""
+    pieces = []
+    for r in code_fails[:5]:
+        pieces.append(
+            f"{r['test_id']}: expected {r['expected'][:200]!r} got {r['actual'][:200]!r}"
+            + (f" error {r['error'][:200]!r}" if r["error"] else "")
+        )
+    return ("Your code failed these tests — fix the logic:\n" + "\n".join(pieces))[:1500]
+
+
 def _smoke(code: str, sig: str = "") -> tuple[dict, dict]:
     from .errors import dummy_args, is_call_failure
     from .tools import guardrail_report as gate
@@ -362,11 +449,17 @@ def coder(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
+    arg_spec = state.get("arg_spec", [])
     feedback = state.get("feedback", "") or state.get("eval", {}).get("feedback", "")
     previous = state.get("code", "")
+    visible = state.get("test_cases", [])
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}"
     if sig:
         user += f"\n\nYou MUST define exactly this function (same name and parameters): {sig}"
+    if visible:
+        user += "\n\nTest cases your solution must satisfy (harness -> expected):\n" + "\n".join(
+            f"- {t['id']}: {t['harness']} -> {t['expected']}" for t in visible[:MAX_TESTS]
+        )
     if feedback:
         user += f"\n\nMust address this feedback:\n{feedback[:1000]}"
     if previous and not previous.strip().startswith("# TODO"):
@@ -421,7 +514,33 @@ def coder(state: dict) -> dict:
             else:
                 overruled = True
 
-    out: dict = {"code": code, "coder_smoke": smoke, "guardrail_report": report}
+    # Bounded self-loop: run the visible tests and decide whether to retry
+    # (code-side failures) or escalate (all remaining failures blame the test).
+    status = "pass"
+    coder_fb = ""
+    inner = state.get("coder_iterations", 0)
+    if visible:
+        results, _ = run_matrix(code, visible, sig, arg_spec, intent, adjudicate_failures=False)
+        failing = [r for r in results if not r["passed"]]
+        if failing:
+            code_fails = [r for r in failing if r["blame"] != "test"]
+            if not code_fails:
+                status = "escalate"  # tests look wrong; let the evaluator adjudicate
+            elif inner < MAX_CODER_RETRIES:
+                status = "retry"
+                coder_fb = _coder_feedback(code_fails)
+            else:
+                status = "escalate"
+
+    out: dict = {
+        "code": code,
+        "coder_smoke": smoke,
+        "guardrail_report": report,
+        "coder_status": status,
+    }
+    if status == "retry":
+        out["coder_iterations"] = inner + 1
+        out["feedback"] = coder_fb
     if fell_back:
         out["fallback_used"] = True
     if overruled:
@@ -436,11 +555,10 @@ def evaluator(state: dict) -> dict:
     to planner with error_class set (Step 3).
     """
     from .errors import classify_error
-    from .prompts import adjudicate
     from .tools.sandbox import run_python
 
     code = state.get("code", "")
-    tests = state.get("test_cases", [])
+    tests = list(state.get("test_cases", [])) + list(state.get("holdout_tests", []))
     sig = state.get("function_signature", "")
     arg_spec = state.get("arg_spec", [])
     problem = state.get("clarified_intent", "")
@@ -453,26 +571,10 @@ def evaluator(state: dict) -> dict:
             "total": len(tests),
             "feedback": f"smoke failed ({classify_error(smoke_err)}), fix code first: {smoke_err[:500]}",
             "error_class": "mechanical",
+            "blame": "code",
         }
         return {"execution_results": [], "eval": ev, "iterations": iterations}
-    results = []
-    for t in tests:
-        r = run_python(code, harness=t["harness"])
-        ok = not r["error"] and r["stdout"].strip() == t["expected"].strip()
-        entry = {
-            "test_id": t["id"],
-            "passed": ok,
-            "actual": r["stdout"].strip()[:2000],
-            "expected": t["expected"].strip()[:2000],
-            "error": r["error"][:2000],
-            "blame": "none",
-            "repaired": False,
-        }
-        if not ok:
-            verdict = adjudicate(problem, sig, arg_spec, code, entry)
-            entry["blame"] = verdict["blame"]
-            entry["error"] = (f"[blame:{verdict['blame']}] {verdict['reason']} " + entry["error"])[:2000]
-        results.append(entry)
+    results, _ = run_matrix(code, tests, sig, arg_spec, problem, adjudicate_failures=True)
     for entry in results:
         if entry["passed"] or entry["blame"] != "test":
             continue
@@ -499,7 +601,14 @@ def evaluator(state: dict) -> dict:
             entry["error"] = ("[escalate] repaired test still fails; needs planner review. " + entry["error"])[:2000]
     passed_count = sum(1 for r in results if r["passed"])
     if not tests:
-        ev = {"passed": False, "passed_count": 0, "total": 0, "feedback": "no test cases generated", "error_class": "empty"}
+        ev = {
+            "passed": False,
+            "passed_count": 0,
+            "total": 0,
+            "feedback": "no test cases generated",
+            "error_class": "empty",
+            "blame": "test",
+        }
     else:
         failed = [r for r in results if not r["passed"]]
         details = "; ".join(
@@ -507,12 +616,18 @@ def evaluator(state: dict) -> dict:
             + (f" error {r['error'][:200]!r}" if r["error"] else "")
             for r in failed[:5]
         )
+        test_blames = sum(1 for r in failed if r["blame"] == "test")
+        code_blames = len(failed) - test_blames
+        blame = "none"
+        if failed:
+            blame = "test" if test_blames > code_blames else "code"
         ev = {
             "passed": passed_count == len(tests),
             "passed_count": passed_count,
             "total": len(tests),
             "feedback": "" if not failed else f"failed {len(failed)}: {details}"[:2000],
             "error_class": "none" if not failed else "logical",
+            "blame": blame,
         }
     return {"execution_results": results, "eval": ev, "iterations": iterations}
 
@@ -543,8 +658,10 @@ def run_reporter(state: dict) -> dict:
         "arg_spec": state.get("arg_spec", []),
         "returns_spec": state.get("returns_spec", ""),
         "test_cases": state.get("test_cases", []),
+        "holdout_tests": state.get("holdout_tests", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),
+        "coder_iterations": state.get("coder_iterations", 0),
         "guardrail_report": state.get("guardrail_report", {}),
         "fallback_used": state.get("fallback_used", False),
         "critic_overruled": state.get("critic_overruled", False),

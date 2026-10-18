@@ -8,6 +8,7 @@ def _no_llm(monkeypatch):
     monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
 
 
 def test_prompt_parsers():
@@ -30,7 +31,12 @@ def test_planner_fallback():
 def test_testgen_fallback_empty():
     from agent.nodes import test_case_gen
 
-    assert test_case_gen({"clarified_intent": "x", "plan_steps": []}) == {"test_cases": []}
+    assert test_case_gen({"clarified_intent": "x", "plan_steps": []}) == {
+        "test_cases": [],
+        "holdout_tests": [],
+        "coder_iterations": 0,
+        "coder_status": "",
+    }
 
 
 def test_coder_fallback_smoke(tmp_path, monkeypatch):
@@ -241,7 +247,8 @@ def test_testgen_critic_regen(monkeypatch):
     verdicts = iter([{"passed": False, "issues": "thin"}, {"passed": True, "issues": ""}])
     monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
     out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
-    assert len(out["test_cases"]) == 3
+    assert len(out["test_cases"]) == 2
+    assert len(out["holdout_tests"]) == 1
     assert "critic_overruled" not in out
 
 
@@ -300,16 +307,18 @@ def test_graph_order_planner_coder_tests(tmp_path, monkeypatch):
     monkeypatch.setattr(llms, "get_small", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     g = graph_mod.build_graph()
     g.invoke({"run_id": "run_id_order", "requirement": "Given an array of ints, return the sorted array. Example: [3,1] -> [1,3]."})
-    first = [n for n in order if n in ("planner", "coder", "tests")]
-    assert first[:3] == ["planner", "coder", "tests"], order
-    # every tests run is preceded by coder, every coder by planner (sequential chain)
-    for i, n in enumerate(first):
+    seq = [n for n in order if n in ("planner", "coder", "tests", "evaluator")]
+    assert seq[:4] == ["planner", "tests", "coder", "evaluator"], order
+    # testgen derives from the planner contract, and every tests run is followed
+    # by the coder; the coder always follows a tests run (TDD chain).
+    for i, n in enumerate(seq):
         if n == "tests":
-            assert first[i - 1] == "coder", order
+            assert seq[i - 1] in ("planner", "evaluator"), order
         if n == "coder":
-            assert first[i - 1] == "planner", order
+            assert seq[i - 1] == "tests", order
 
 
 def test_heavy_fallback_flag(monkeypatch):
@@ -328,3 +337,107 @@ def test_heavy_fallback_flag(monkeypatch):
     assert out["fallback_used"] is True
     assert calls[0] == "heavy" and calls[-1] == "small"
     assert out["plan_steps"]
+
+
+def test_testgen_ignores_code_reference(monkeypatch):
+    """TDD ordering: testgen must derive from the contract, never the code."""
+    import agent.nodes as nodes
+
+    seen = {}
+
+    def fake_gen(*a, **k):
+        seen["user"] = a[1]
+        return '[{"id": "t1", "harness": "print(solve([1], 0))", "expected": "x"}]'
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    nodes.test_case_gen({
+        "clarified_intent": "rotate",
+        "plan_steps": [],
+        "function_signature": "def solve(arr, k)",
+        "code": "def solve(arr, k):\n    return 'SECRET_MARKER'\n",
+    })
+    assert "SECRET_MARKER" not in seen["user"]
+    assert "Reference implementation" not in seen["user"]
+
+
+def test_coder_inner_loop_retries_on_code_failure(monkeypatch):
+    import agent.nodes as nodes
+
+    monkeypatch.setattr(nodes, "try_invoke_with_fallback", lambda *a, **k: ("def solve(a):\n    return a + 1\n", False))
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: {"passed": True, "issues": ""})
+    out = nodes.coder({
+        "clarified_intent": "identity",
+        "plan_steps": [],
+        "function_signature": "def solve(a)",
+        "test_cases": [{"id": "t1", "harness": "print(solve(1))", "expected": "1"}],
+        "coder_iterations": 0,
+    })
+    assert out["coder_status"] == "retry"
+    assert out["coder_iterations"] == 1
+    assert "t1" in out["feedback"]
+
+
+def test_coder_escalates_when_all_failures_blame_test(monkeypatch):
+    import agent.nodes as nodes
+
+    monkeypatch.setattr(nodes, "try_invoke_with_fallback", lambda *a, **k: ("def solve(a):\n    return a\n", False))
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: {"passed": True, "issues": ""})
+    out = nodes.coder({
+        "clarified_intent": "identity",
+        "plan_steps": [],
+        "function_signature": "def solve(a)",
+        # harness calls solve with the wrong arity -> deterministic test blame
+        "test_cases": [{"id": "t1", "harness": "print(solve(1, 2))", "expected": "1"}],
+    })
+    assert out["coder_status"] == "escalate"
+    assert "coder_iterations" not in out
+
+
+def test_evaluator_dominant_blame():
+    from agent.nodes import evaluator
+
+    code = "def solve(a):\n    return a\n"
+    test_side = evaluator({
+        "code": code,
+        "test_cases": [{"id": "t1", "harness": "print(solve(1, 2))", "expected": "1"}],
+        "function_signature": "def solve(a)",
+    })
+    assert test_side["eval"]["blame"] == "test"
+    code_side = evaluator({
+        "code": code,
+        "test_cases": [{"id": "t1", "harness": "print(solve(1))", "expected": "2"}],
+    })
+    assert code_side["eval"]["blame"] == "code"
+
+
+def test_evaluator_runs_holdout_tests():
+    from agent.nodes import evaluator
+
+    code = "def solve(a):\n    return a\n"
+    out = evaluator({
+        "code": code,
+        "test_cases": [{"id": "t1", "harness": "print(solve(1))", "expected": "1"}],
+        "holdout_tests": [{"id": "h1", "harness": "print(solve(2))", "expected": "2"}],
+    })
+    assert {r["test_id"] for r in out["execution_results"]} == {"t1", "h1"}
+    assert out["eval"]["total"] == 2
+
+
+def test_route_coder_inner_loop():
+    from agent.graph import _route_coder
+
+    assert _route_coder({"coder_status": "retry", "coder_iterations": 1}) == "coder"
+    assert _route_coder({"coder_status": "retry", "coder_iterations": 4}) == "evaluator"
+    assert _route_coder({"coder_status": "escalate"}) == "evaluator"
+    assert _route_coder({"coder_status": "pass"}) == "evaluator"
+
+
+def test_route_eval_blame_aware():
+    from agent.graph import _route_eval
+
+    assert _route_eval({"eval": {"passed": True}}) == "reporter"
+    assert _route_eval({"eval": {"passed": False, "error_class": "empty"}, "iterations": 1}) == "tests"
+    assert _route_eval({"eval": {"passed": False, "blame": "test"}, "iterations": 1}) == "tests"
+    assert _route_eval({"eval": {"passed": False, "blame": "code"}, "iterations": 1}) == "planner"
+    assert _route_eval({"eval": {"passed": False, "blame": "code"}, "iterations": 3}) == "reporter"
+

@@ -13,6 +13,12 @@ SMALL_TIMEOUT_S = int(os.getenv("OLLAMA_SMALL_TIMEOUT", "90"))
 HEAVY_TIMEOUT_S = int(os.getenv("OLLAMA_HEAVY_TIMEOUT", "180"))
 CRITIC_MODEL = os.getenv("OLLAMA_CRITIC", "nemotron-3-super:cloud")
 
+# Test generation is promoted to the heavy model with reasoning enabled so the
+# expected outputs are computed deliberately (TDD ordering: tests precede code).
+TESTGEN_MODEL = os.getenv("OLLAMA_TESTGEN", HEAVY_MODEL)
+TESTGEN_TIMEOUT_S = int(os.getenv("OLLAMA_TESTGEN_TIMEOUT", str(HEAVY_TIMEOUT_S)))
+TESTGEN_THINK = os.getenv("OLLAMA_TESTGEN_THINK", "1").strip().lower() not in ("0", "false", "no", "")
+
 
 def get_small() -> ChatOllama:
     return ChatOllama(
@@ -44,4 +50,20 @@ def get_critic() -> ChatOllama:
         temperature=0,
         num_predict=512,
         client_kwargs={"timeout": 60},
+    )
+
+
+def get_testgen() -> ChatOllama:
+    """Heavy test-generation model with reasoning enabled.
+
+    TDD ordering makes expected outputs load-bearing, so testgen runs on the
+    heavy model with `reasoning=True` (override OLLAMA_TESTGEN / *_THINK).
+    """
+    return ChatOllama(
+        model=TESTGEN_MODEL,
+        base_url=BASE_URL,
+        temperature=0,
+        num_predict=4096,
+        reasoning=TESTGEN_THINK,
+        client_kwargs={"timeout": TESTGEN_TIMEOUT_S},
     )

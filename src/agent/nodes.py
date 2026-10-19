@@ -5,7 +5,6 @@ Every LLM call falls back to deterministic behavior so tests stay hermetic.
 
 from __future__ import annotations
 
-from . import prompts
 from .tools.guardrail import is_truncated
 from .prompts import (
     CODER_REPAIR_SYSTEM,
@@ -16,6 +15,7 @@ from .prompts import (
     args_in_range,
     code_defines_signature,
     critique,
+    diagnose,
     extract_code,
     extract_contract,
     extract_json_array,
@@ -27,7 +27,6 @@ from .prompts import (
 
 MAX_INTENT_ITERATIONS = 3
 MAX_TESTS = 10
-MAX_CODER_RETRIES = 3  # inner self-loop retries before handing to the evaluator
 HOLDOUT_MIN_TESTS = 3  # only split off a holdout when this many tests exist
 
 _CLEAR_KEYWORDS = (
@@ -381,7 +380,7 @@ def test_case_gen(state: dict) -> dict:
     if feedback:
         user += f"\n\nPrevious tests were rejected — fix them:\n{feedback[:1000]}"
     text = _invoke_testgen(user, TESTGEN_SYSTEM)
-    empty = {"test_cases": [], "holdout_tests": [], "coder_iterations": 0, "coder_status": ""}
+    empty = {"test_cases": [], "holdout_tests": []}
     if not text:
         return dict(empty)
     parsed = extract_json_array(text)
@@ -413,8 +412,6 @@ def test_case_gen(state: dict) -> dict:
     out: dict = {
         "test_cases": tests,
         "holdout_tests": holdout,
-        "coder_iterations": 0,
-        "coder_status": "",
     }
     if overruled:
         out["critic_overruled"] = True
@@ -506,17 +503,6 @@ def run_matrix(
     return results, summary
 
 
-def _coder_feedback(code_fails: list[dict]) -> str:
-    """Actionable feedback for the coder's self-loop from code-blamed failures."""
-    pieces = []
-    for r in code_fails[:5]:
-        pieces.append(
-            f"{r['test_id']}: expected {r['expected'][:200]!r} got {r['actual'][:200]!r}"
-            + (f" error {r['error'][:200]!r}" if r["error"] else "")
-        )
-    return ("Your code failed these tests — fix the logic:\n" + "\n".join(pieces))[:1500]
-
-
 def _smoke(code: str, sig: str = "") -> tuple[dict, dict]:
     from .errors import dummy_args, is_call_failure
     from .tools import guardrail_report as gate
@@ -542,7 +528,6 @@ def coder(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
-    arg_spec = state.get("arg_spec", [])
     feedback = state.get("feedback", "") or state.get("eval", {}).get("feedback", "")
     previous = state.get("code", "")
     visible = state.get("test_cases", [])
@@ -607,36 +592,13 @@ def coder(state: dict) -> dict:
             else:
                 overruled = True
 
-    # Bounded self-loop: run the visible tests and decide whether to retry
-    # (code-side failures) or escalate (all remaining failures blame the test).
-    status = "pass"
-    coder_fb = ""
-    inner = state.get("coder_iterations", 0)
-    checks: list[dict] = []
-    if visible:
-        results, _ = run_matrix(code, visible, sig, arg_spec, intent, adjudicate_failures=False)
-        checks = results
-        failing = [r for r in results if not r["passed"]]
-        if failing:
-            code_fails = [r for r in failing if r["blame"] != "test"]
-            if not code_fails:
-                status = "escalate"  # tests look wrong; let the evaluator adjudicate
-            elif inner < MAX_CODER_RETRIES:
-                status = "retry"
-                coder_fb = _coder_feedback(code_fails)
-            else:
-                status = "escalate"
-
+    # No self-loop: the coder produces one solution and hands it to the
+    # evaluator, which is the single authority that blames and routes failures.
     out: dict = {
         "code": code,
         "coder_smoke": smoke,
         "guardrail_report": report,
-        "coder_status": status,
-        "coder_checks": checks,
     }
-    if status == "retry":
-        out["coder_iterations"] = inner + 1
-        out["feedback"] = coder_fb
     if fell_back:
         out["fallback_used"] = True
     if overruled:
@@ -661,15 +623,23 @@ def evaluator(state: dict) -> dict:
     iterations = state.get("iterations", 0) + 1
     smoke_err = (state.get("coder_smoke") or {}).get("error", "")
     if smoke_err and classify_error(smoke_err) in ("mechanical", "blocked", "timeout"):
+        reason = f"smoke failed ({classify_error(smoke_err)}), fix code first: {smoke_err[:500]}"
         ev = {
             "passed": False,
             "passed_count": 0,
             "total": len(tests),
-            "feedback": f"smoke failed ({classify_error(smoke_err)}), fix code first: {smoke_err[:500]}",
+            "feedback": reason,
             "error_class": "mechanical",
             "blame": "code",
         }
-        return {"execution_results": [], "eval": ev, "iterations": iterations}
+        return {
+            "execution_results": [],
+            "eval": ev,
+            "iterations": iterations,
+            "failure_report": {"culprit": "code", "reason": reason, "failing": []},
+            "next_action": "replan_code",
+            "feedback": f"[code] {reason}",
+        }
     results, _ = run_matrix(code, tests, sig, arg_spec, problem, adjudicate_failures=True)
     for entry in results:
         if entry["passed"] or entry["blame"] != "test":
@@ -696,6 +666,9 @@ def evaluator(state: dict) -> dict:
             entry["blame"] = "unknown"
             entry["error"] = ("[escalate] repaired test still fails; needs planner review. " + entry["error"])[:2000]
     passed_count = sum(1 for r in results if r["passed"])
+    failure_report: dict = {}
+    next_action = ""
+    feedback = ""
     if not tests:
         ev = {
             "passed": False,
@@ -705,6 +678,9 @@ def evaluator(state: dict) -> dict:
             "error_class": "empty",
             "blame": "test",
         }
+        failure_report = {"culprit": "test", "reason": "no test cases generated", "failing": []}
+        next_action = "fix_tests"
+        feedback = "[test] no test cases generated"
     else:
         failed = [r for r in results if not r["passed"]]
         details = "; ".join(
@@ -717,6 +693,19 @@ def evaluator(state: dict) -> dict:
         blame = "none"
         if failed:
             blame = "test" if test_blames > code_blames else "code"
+            # Holistic verdict from the evaluator-only model: it reads the code
+            # and every failure, then names the owner (code vs tests) + reason.
+            verdict = diagnose(problem, sig, arg_spec, code, failed, default_blame=blame)
+            culprit = verdict["culprit"]
+            reason = verdict["reason"]
+            blame = culprit
+            failure_report = {
+                "culprit": culprit,
+                "reason": reason,
+                "failing": [r["test_id"] for r in failed],
+            }
+            next_action = "fix_tests" if culprit == "test" else "replan_code"
+            feedback = f"[{culprit}] {reason}; failed {len(failed)}: {details}"[:2000]
         ev = {
             "passed": passed_count == len(tests),
             "passed_count": passed_count,
@@ -725,7 +714,14 @@ def evaluator(state: dict) -> dict:
             "error_class": "none" if not failed else "logical",
             "blame": blame,
         }
-    return {"execution_results": results, "eval": ev, "iterations": iterations}
+    return {
+        "execution_results": results,
+        "eval": ev,
+        "iterations": iterations,
+        "failure_report": failure_report,
+        "next_action": next_action,
+        "feedback": feedback,
+    }
 
 
 def run_reporter(state: dict) -> dict:
@@ -734,13 +730,13 @@ def run_reporter(state: dict) -> dict:
     from datetime import datetime, timezone
     from pathlib import Path
 
-    from .llms import HEAVY_MODEL, SMALL_MODEL
+    from .llms import EVALUATOR_MODEL, HEAVY_MODEL, SMALL_MODEL
 
     run_id = state.get("run_id", "run_id_unknown")
     out = {
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "models": {"heavy": HEAVY_MODEL, "small": SMALL_MODEL},
+        "models": {"heavy": HEAVY_MODEL, "small": SMALL_MODEL, "evaluator": EVALUATOR_MODEL},
         "requirement": state.get("requirement", ""),
         "gather_mode": state.get("gather_mode", "interactive"),
         "status": state.get("status", "ok"),
@@ -761,13 +757,14 @@ def run_reporter(state: dict) -> dict:
         "holdout_tests": state.get("holdout_tests", []),
         "code": state.get("code", ""),
         "coder_smoke": state.get("coder_smoke", {}),
-        "coder_checks": state.get("coder_checks", []),
-        "coder_iterations": state.get("coder_iterations", 0),
         "guardrail_report": state.get("guardrail_report", {}),
         "fallback_used": state.get("fallback_used", False),
         "critic_overruled": state.get("critic_overruled", False),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
+        "failure_report": state.get("failure_report", {}),
+        "next_action": state.get("next_action", ""),
+        "feedback": state.get("feedback", ""),
     }
     path = Path(state.get("out_dir") or "output") / f"{run_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

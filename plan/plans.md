@@ -1,7 +1,7 @@
 # Execution Plan — LangGraph DSA Solver (steps 1–9)
 
 Source: `architecture.md` + `guardrails.md` | Updated: 2026-10-18
-Progress: Steps 1–18 complete on `plan/plan.md` (101 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
+Progress: Steps 1–19 complete on `plan/plan.md` (103 tests green; Two Sum, Valid Parentheses, Binary Search all 5/5 live).
 
 ## Step 1 — IntentClarifier LLM
 Replace heuristic-only with `deepseek-r1:1.5b` rewrite pass; keep max-3 self-loop
@@ -128,4 +128,20 @@ stable JSON schema for an LLM-as-judge; a transport failure is `infra_error`
 codes `0` ok/assumed/aborted, `1` infra, `2` bad input. Full plan:
 `plan/plan.md` (Increment 4). Verify: `PYTHONPATH=src uv run pytest -q
 tests/test_intent.py tests/test_cli.py`.
+
+## Step 19 — Evaluator-owned blame/diagnosis, no coder self-loop [done]
+Removed the coder's inner self-loop (`_route_coder`, `coder_status`,
+`coder_iterations`, `coder_checks`): the coder now writes one solution and hands
+straight to the evaluator (`coder → evaluator`). The evaluator runs on a new
+evaluator-only model `nemotron-3-ultra:cloud` (`get_evaluator`, `OLLAMA_EVALUATOR*`)
+— used nowhere else — via `adjudicate()` (per-test) + `diagnose()` (holistic:
+reads the code + failures → `{culprit, reason}`), emitting
+`failure_report{culprit,reason,failing[]}`, `next_action`, and a readable
+`feedback` string. Routing keeps the unaffected artifact: **code** blame →
+`Planner → Coder` (tests retained; `_route_planner` skips `TestCaseGen`),
+**test** blame/empty → `TestCaseGen → Evaluator` (code retained; `_route_tests`
+skips `Coder`). Retry budget is now **1** (`MAX_ITERATIONS = 2`, 1 original + 1
+retry). CLI drops the coder self-check table and adds an evaluator diagnosis
+panel. Verify: `PYTHONPATH=src uv run pytest -q tests/test_nodes.py
+tests/test_adjudicate.py tests/test_cli.py tests/test_reporter.py` (103 tests).
 

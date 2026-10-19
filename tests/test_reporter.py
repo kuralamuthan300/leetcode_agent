@@ -26,19 +26,20 @@ def test_reporter_schema_complete(tmp_path, monkeypatch):
         "holdout_tests": [],
         "code": "def solve(a):\n    return a\n",
         "coder_smoke": {"error": ""},
-        "coder_checks": [],
-        "coder_iterations": 0,
         "guardrail_report": {"allowed": True},
         "fallback_used": False,
         "critic_overruled": False,
         "execution_results": [],
         "eval": {"passed": True, "passed_count": 1, "total": 1, "feedback": "", "error_class": "none"},
+        "failure_report": {},
+        "next_action": "",
+        "feedback": "",
     }
     out = run_reporter(state)
     assert out["output_path"] == "output/run_id_schema.json"
     doc = json.loads(open("output/run_id_schema.json").read())
     expected = set(state) | {"timestamp", "models"}
     assert set(doc) == expected, set(doc) ^ expected
-    from agent.llms import HEAVY_MODEL, SMALL_MODEL
+    from agent.llms import EVALUATOR_MODEL, HEAVY_MODEL, SMALL_MODEL
 
-    assert doc["models"] == {"heavy": HEAVY_MODEL, "small": SMALL_MODEL}
+    assert doc["models"] == {"heavy": HEAVY_MODEL, "small": SMALL_MODEL, "evaluator": EVALUATOR_MODEL}

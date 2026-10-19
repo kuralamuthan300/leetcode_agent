@@ -43,12 +43,11 @@ class AgentState(TypedDict, total=False):
     holdout_tests: list[dict[str, Any]]  # evaluator-only; hidden from the coder
     code: str
     coder_smoke: dict[str, str]
-    coder_checks: list[ExecutionResult]  # coder self-loop per-test results
-    coder_iterations: int  # inner-loop retries used this outer round
-    coder_status: str  # pass | retry | escalate
     guardrail_report: dict
     execution_results: list[ExecutionResult]  # replace semantics: latest run only
     eval: EvalReport
+    failure_report: dict  # {culprit, reason, failing[]} when the last eval failed
+    next_action: str  # router hint: replan_code | fix_tests | "" (fresh run)
     feedback: str
     iterations: int
     fallback_used: bool

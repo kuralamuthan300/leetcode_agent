@@ -9,6 +9,7 @@ def _no_llm(monkeypatch):
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_evaluator", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
 
 
 def _t(harness, expected="x", actual="", error=""):
@@ -115,3 +116,18 @@ def test_repair_still_failing_escalates(monkeypatch):
     assert entry["passed"] is False
     assert entry["blame"] == "unknown"
     assert "escalate" in entry["error"]
+
+
+def test_diagnose_parses_and_falls_back(monkeypatch):
+    import agent.prompts as prompts
+
+    failing = [{"test_id": "t1", "harness": "print(solve(1))", "expected": "2", "actual": "1", "error": ""}]
+    monkeypatch.setattr(prompts, "try_invoke", lambda *a, **k: '{"culprit": "test", "reason": "bad expectation"}')
+    out = prompts.diagnose("p", "def solve(a)", [], "code", failing, default_blame="code")
+    assert out == {"culprit": "test", "reason": "bad expectation"}
+
+    # Unavailable judge -> deterministic default blame, never a stall.
+    monkeypatch.setattr(prompts, "try_invoke", lambda *a, **k: None)
+    out = prompts.diagnose("p", "def solve(a)", [], "code", failing, default_blame="code")
+    assert out["culprit"] == "code"
+    assert out["reason"]

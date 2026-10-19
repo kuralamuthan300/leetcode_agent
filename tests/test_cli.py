@@ -139,6 +139,16 @@ def test_render_results_shows_io_and_result(monkeypatch):
     assert cli._render_results([]) is None  # empty -> nothing printed
 
 
+def test_render_diagnosis_shows_culprit_and_reason(monkeypatch):
+    import cli
+
+    buf = _capture(monkeypatch)
+    cli._render_diagnosis({"culprit": "code", "reason": "off-by-one at the loop bound", "failing": ["t2"]})
+    out = buf.getvalue()
+    assert "code" in out and "off-by-one" in out and "t2" in out
+    assert cli._render_diagnosis({}) is None  # empty -> nothing printed
+
+
 def test_render_plan_panel(monkeypatch):
     import cli
 
@@ -170,7 +180,7 @@ def test_run_graph_show_toggle(monkeypatch):
         def stream(self, state, stream_mode=None):
             yield {"planner": {"plan_steps": ["a"]}}
             yield {"tests": {"test_cases": [], "holdout_tests": []}}
-            yield {"coder": {"code": "def solve():\n    pass\n", "coder_checks": []}}
+            yield {"coder": {"code": "def solve():\n    pass\n"}}
 
     cli._run_graph(FakeGraph(), {}, show=False)
     assert calls == []
@@ -203,9 +213,10 @@ def test_next_node_predicts_routing():
     assert cli._next_node("gather", {"intent_clear": False, "intent_iterations": 1}) == "gather"
     assert cli._next_node("gather", {"rejected": True}) == "reporter"
     assert cli._next_node("planner", {}) == "tests"
+    assert cli._next_node("planner", {"next_action": "replan_code"}) == "coder"
     assert cli._next_node("tests", {}) == "coder"
-    assert cli._next_node("coder", {"coder_status": "retry", "coder_iterations": 1}) == "coder"
-    assert cli._next_node("coder", {"coder_status": "pass", "coder_iterations": 1}) == "evaluator"
+    assert cli._next_node("tests", {"next_action": "fix_tests"}) == "evaluator"
+    assert cli._next_node("coder", {}) == "evaluator"
     assert cli._next_node("evaluator", {"eval": {"passed": True}}) == "reporter"
     assert cli._next_node("evaluator", {"eval": {"passed": False, "blame": "test"}}) == "tests"
     assert cli._next_node("evaluator", {"eval": {"passed": False, "blame": "code"}}) == "planner"

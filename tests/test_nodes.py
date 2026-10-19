@@ -9,6 +9,7 @@ def _no_llm(monkeypatch):
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_evaluator", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
 
 
 def test_prompt_parsers():
@@ -34,8 +35,6 @@ def test_testgen_fallback_empty():
     assert test_case_gen({"clarified_intent": "x", "plan_steps": []}) == {
         "test_cases": [],
         "holdout_tests": [],
-        "coder_iterations": 0,
-        "coder_status": "",
     }
 
 
@@ -47,7 +46,8 @@ def test_coder_fallback_smoke(tmp_path, monkeypatch):
     assert out["code"].startswith("# TODO")
     assert out["coder_smoke"]["error"] == ""
     assert out["guardrail_report"]["allowed"] is True
-    assert out["coder_checks"] == []
+    assert "coder_checks" not in out
+    assert "coder_status" not in out
 
 
 def test_evaluator_matrix_and_iterations(tmp_path, monkeypatch):
@@ -309,6 +309,7 @@ def test_graph_order_planner_coder_tests(tmp_path, monkeypatch):
     monkeypatch.setattr(llms, "get_heavy", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(llms, "get_evaluator", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     g = graph_mod.build_graph()
     g.invoke({"run_id": "run_id_order", "requirement": "Given an array of ints, return the sorted array. Example: [3,1] -> [1,3]."})
     seq = [n for n in order if n in ("planner", "coder", "tests", "evaluator")]
@@ -361,7 +362,8 @@ def test_testgen_ignores_code_reference(monkeypatch):
     assert "Reference implementation" not in seen["user"]
 
 
-def test_coder_inner_loop_retries_on_code_failure(monkeypatch):
+def test_coder_hands_off_without_self_loop(monkeypatch):
+    """The coder no longer runs the tests itself; the evaluator owns blame."""
     import agent.nodes as nodes
 
     monkeypatch.setattr(nodes, "try_invoke_with_fallback", lambda *a, **k: ("def solve(a):\n    return a + 1\n", False))
@@ -371,29 +373,11 @@ def test_coder_inner_loop_retries_on_code_failure(monkeypatch):
         "plan_steps": [],
         "function_signature": "def solve(a)",
         "test_cases": [{"id": "t1", "harness": "print(solve(1))", "expected": "1"}],
-        "coder_iterations": 0,
     })
-    assert out["coder_status"] == "retry"
-    assert out["coder_iterations"] == 1
-    assert "t1" in out["feedback"]
-    assert out["coder_checks"][0]["test_id"] == "t1"
-    assert out["coder_checks"][0]["harness"] == "print(solve(1))"
-
-
-def test_coder_escalates_when_all_failures_blame_test(monkeypatch):
-    import agent.nodes as nodes
-
-    monkeypatch.setattr(nodes, "try_invoke_with_fallback", lambda *a, **k: ("def solve(a):\n    return a\n", False))
-    monkeypatch.setattr(nodes, "critique", lambda *a, **k: {"passed": True, "issues": ""})
-    out = nodes.coder({
-        "clarified_intent": "identity",
-        "plan_steps": [],
-        "function_signature": "def solve(a)",
-        # harness calls solve with the wrong arity -> deterministic test blame
-        "test_cases": [{"id": "t1", "harness": "print(solve(1, 2))", "expected": "1"}],
-    })
-    assert out["coder_status"] == "escalate"
+    assert out["code"] == "def solve(a):\n    return a + 1\n"
+    assert "coder_status" not in out
     assert "coder_iterations" not in out
+    assert "coder_checks" not in out
 
 
 def test_evaluator_dominant_blame():
@@ -426,21 +410,38 @@ def test_evaluator_runs_holdout_tests():
     assert out["eval"]["total"] == 2
 
 
-def test_route_coder_inner_loop():
-    from agent.graph import _route_coder
+def test_route_planner_and_tests_retain():
+    """Code-blame skips tests; test-blame skips the coder."""
+    from agent.graph import _route_planner, _route_tests
 
-    assert _route_coder({"coder_status": "retry", "coder_iterations": 1}) == "coder"
-    assert _route_coder({"coder_status": "retry", "coder_iterations": 4}) == "evaluator"
-    assert _route_coder({"coder_status": "escalate"}) == "evaluator"
-    assert _route_coder({"coder_status": "pass"}) == "evaluator"
+    assert _route_planner({}) == "tests"  # fresh run: generate tests
+    assert _route_planner({"next_action": "replan_code"}) == "coder"  # retain tests
+    assert _route_tests({}) == "coder"  # fresh run: code the tests
+    assert _route_tests({"next_action": "fix_tests"}) == "evaluator"  # retain code
 
 
 def test_route_eval_blame_aware():
-    from agent.graph import _route_eval
+    from agent.graph import MAX_ITERATIONS, _route_eval
 
     assert _route_eval({"eval": {"passed": True}}) == "reporter"
     assert _route_eval({"eval": {"passed": False, "error_class": "empty"}, "iterations": 1}) == "tests"
     assert _route_eval({"eval": {"passed": False, "blame": "test"}, "iterations": 1}) == "tests"
     assert _route_eval({"eval": {"passed": False, "blame": "code"}, "iterations": 1}) == "planner"
-    assert _route_eval({"eval": {"passed": False, "blame": "code"}, "iterations": 3}) == "reporter"
+    assert _route_eval({"eval": {"passed": False, "blame": "code"}, "iterations": MAX_ITERATIONS}) == "reporter"
+
+
+def test_evaluator_emits_failure_report():
+    """A failing eval tags the owner and hands the planner/test a reason."""
+    from agent.nodes import evaluator
+
+    code = "def solve(a):\n    return a\n"
+    out = evaluator({
+        "code": code,
+        "test_cases": [{"id": "t1", "harness": "print(solve(1))", "expected": "2"}],
+    })
+    assert out["eval"]["passed"] is False
+    assert out["failure_report"]["culprit"] == "code"
+    assert out["failure_report"]["failing"] == ["t1"]
+    assert out["next_action"] == "replan_code"
+    assert out["feedback"].startswith("[code]")
 

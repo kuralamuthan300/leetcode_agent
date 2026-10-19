@@ -112,6 +112,17 @@ JUDGE_SYSTEM = (
     "else UNKNOWN."
 )
 
+DIAGNOSE_SYSTEM = (
+    "You are a strict judge for a DSA solver. Given the problem, the function "
+    "contract, the candidate solution code, and the failing tests (harness, "
+    "expected, actual, error), decide whether the CODE is at fault or the TESTS "
+    "are at fault, and give a one-to-two sentence root-cause reason. "
+    "Reply with ONLY a JSON object: "
+    '{"culprit": "code" or "test", "reason": "<short explanation>"}. '
+    'Use "code" when the solution logic is wrong; use "test" only when the '
+    "expected output or harness inputs are wrong for the problem."
+)
+
 PLAN_CHECKLIST = (
     "1. States one approach. 2. States time/space complexity. "
     "3. Has numbered implementation steps. "
@@ -137,7 +148,8 @@ def adjudicate(problem: str, sig: str, arg_spec: list, code: str, test: dict) ->
     """Blame a failing test: {"blame": code|test|unknown, "reason": str}.
 
     Deterministic contract violations (arity, out-of-range args) blame the
-    test without any LLM call; the rest goes to one small-model verdict.
+    test without any LLM call; the rest goes to one evaluator-model verdict
+    (small-model fallback when the evaluator is unavailable).
     """
     harness = test.get("harness", "")
     if sig and not harness_matches(harness, sig):
@@ -151,7 +163,10 @@ def adjudicate(problem: str, sig: str, arg_spec: list, code: str, test: dict) ->
         f"expected={test.get('expected', '')[:500]!r} actual={test.get('actual', '')[:500]!r} "
         f"error={test.get('error', '')[:500]!r}"
     )
-    verdict = try_invoke("small", user, JUDGE_SYSTEM)
+    verdict = try_invoke("evaluator", user, JUDGE_SYSTEM)
+    if not verdict:
+        # Fall back to the small model only if the judge model is unavailable.
+        verdict = try_invoke("small", user, JUDGE_SYSTEM)
     if not verdict:
         return {"blame": "unknown", "reason": "judge unavailable"}
     up = verdict.strip().upper()
@@ -160,6 +175,35 @@ def adjudicate(problem: str, sig: str, arg_spec: list, code: str, test: dict) ->
     if up.startswith("TEST_WRONG:"):
         return {"blame": "test", "reason": verdict[len("TEST_WRONG:"):].strip()[:300]}
     return {"blame": "unknown", "reason": verdict[:300]}
+
+
+def diagnose(problem: str, sig: str, arg_spec: list, code: str, failing: list, default_blame: str = "code") -> dict:
+    """Holistic failure verdict: {"culprit": code|test, "reason": str}.
+
+    Reads the code and every failing test. Falls back to `default_blame` (the
+    evaluator's dominant per-test blame) when the judge model is unavailable or
+    the reply is unparseable, so the run never stalls on a diagnosis.
+    """
+    contract = _contract_brief_fallback(sig, arg_spec)
+    lines = []
+    for r in failing[:5]:
+        lines.append(
+            f"- {r.get('test_id')}: harness={str(r.get('harness', ''))[:300]} "
+            f"expected={str(r.get('expected', ''))[:200]!r} actual={str(r.get('actual', ''))[:200]!r} "
+            f"error={str(r.get('error', ''))[:200]!r}"
+        )
+    user = (
+        f"Problem:\n{problem[:2000]}\n\n{contract}\n\nCode:\n{code[:3000]}\n\n"
+        "Failing tests:\n" + ("\n".join(lines) or "- (none provided)")
+    )
+    text = try_invoke("evaluator", user, DIAGNOSE_SYSTEM)
+    data = extract_json_object(text) if text else None
+    if isinstance(data, dict):
+        culprit = str(data.get("culprit", "")).strip().lower()
+        if culprit in ("code", "test"):
+            reason = str(data.get("reason", "")).strip()[:500]
+            return {"culprit": culprit, "reason": reason or "no reason given"}
+    return {"culprit": default_blame, "reason": "diagnosis unavailable; defaulting to per-test blame"}
 
 
 def _contract_brief_fallback(sig: str, arg_spec: list) -> str:
@@ -237,7 +281,7 @@ def try_invoke(kind: str, user: str, system: str, retries: int = 1) -> str | Non
     """Invoke a model role (small / heavy / testgen); retry on empty; None on failure."""
     from . import llms
 
-    getters = {"small": llms.get_small, "heavy": llms.get_heavy, "testgen": llms.get_testgen}
+    getters = {"small": llms.get_small, "heavy": llms.get_heavy, "testgen": llms.get_testgen, "evaluator": llms.get_evaluator}
     getter = getters.get(kind, llms.get_small)
     for _ in range(retries + 1):
         try:

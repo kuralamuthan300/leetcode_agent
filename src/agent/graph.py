@@ -3,7 +3,6 @@ from __future__ import annotations
 from langgraph.graph import END, StateGraph
 
 from .nodes import (
-    MAX_CODER_RETRIES,
     MAX_INTENT_ITERATIONS,
     coder,
     evaluator,
@@ -14,7 +13,11 @@ from .nodes import (
 )
 from .state import AgentState
 
-MAX_ITERATIONS = 3
+# The coder no longer self-loops: it produces one solution and hands off to the
+# evaluator. Failures route back through the planner (code at fault) or the
+# tests node (tests at fault) with a single retry.
+MAX_PLANNER_RETRIES = 1
+MAX_ITERATIONS = MAX_PLANNER_RETRIES + 1  # 1 original run + 1 retry run
 
 
 def _route_gather(state: AgentState) -> str:
@@ -30,15 +33,22 @@ def _route_gather(state: AgentState) -> str:
     return "gather"
 
 
-def _route_coder(state: AgentState) -> str:
-    """Inner self-loop: retry while the coder has budget, else hand to evaluator."""
-    if state.get("coder_status") == "retry" and state.get("coder_iterations", 0) <= MAX_CODER_RETRIES:
+def _route_planner(state: AgentState) -> str:
+    """After a code-blame retry, keep the tests and go straight to the coder."""
+    if state.get("next_action") == "replan_code":
         return "coder"
-    return "evaluator"
+    return "tests"
+
+
+def _route_tests(state: AgentState) -> str:
+    """After a test-blame retry, fix the tests but keep the existing code."""
+    if state.get("next_action") == "fix_tests":
+        return "evaluator"
+    return "coder"
 
 
 def _route_eval(state: AgentState) -> str:
-    """Route failures back to the producer of the blame (test vs code)."""
+    """Route failures back to the producer of the blame (tests vs code)."""
     ev = state.get("eval", {})
     if ev.get("passed"):
         return "reporter"
@@ -63,9 +73,11 @@ def build_graph():
         {"gather": "gather", "planner": "planner", "reporter": "reporter"},
     )
     # TDD ordering: tests derive from the planner contract, then drive the coder.
-    g.add_edge("planner", "tests")
-    g.add_edge("tests", "coder")
-    g.add_conditional_edges("coder", _route_coder, {"coder": "coder", "evaluator": "evaluator"})
+    # On a code-blame retry the planner skips test generation (tests are retained).
+    g.add_conditional_edges("planner", _route_planner, {"tests": "tests", "coder": "coder"})
+    # On a test-blame retry the tests node skips the coder (code is retained).
+    g.add_conditional_edges("tests", _route_tests, {"coder": "coder", "evaluator": "evaluator"})
+    g.add_edge("coder", "evaluator")
     g.add_conditional_edges(
         "evaluator", _route_eval,
         {"tests": "tests", "planner": "planner", "reporter": "reporter"},

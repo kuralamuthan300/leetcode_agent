@@ -1,14 +1,20 @@
 # leetcodeagent — LangGraph DSA solver
 
 Terminal-driven agent that solves data-structures & algorithms problems:
-clarify intent → plan → generate tests → write code (bounded self-loop) →
+clarify intent → plan → generate tests → write code →
 verify in a sandboxed, guardrailed runner → write `output/run_id_xxxx.json`.
 
 Graph: `RequirementGatherer (self-loop max 3) → Planner → TestCaseGen →
-Coder (self-loop max 3) → Evaluator (blame-aware, max 3) → RunReporter`.
-Models (Ollama): heavy `nemotron-3-super:cloud` (plan/code/eval), testgen
+Coder → Evaluator (evaluator-only ultra, blame-aware, 1 retry) → RunReporter`.
+The coder does **not** self-loop: it writes one solution and hands it to the
+evaluator, which reads the code and the failing tests and decides whether the
+**code** or the **tests** are at fault. Code blame re-runs `Planner → Coder`
+(tests retained); test blame re-runs `TestCaseGen → Evaluator` (code retained).
+One retry overall (1 original run + 1 retry run).
+Models (Ollama): heavy `nemotron-3-super:cloud` (plan/code), testgen
 `nemotron-3-super:cloud` with reasoning on (plan tests), small
-`gemma4:31b-cloud` (clarify).
+`gemma4:31b-cloud` (clarify), evaluator `nemotron-3-ultra:cloud` (blame +
+diagnosis; used **only** by the evaluator).
 
 ## Prerequisites
 
@@ -20,6 +26,7 @@ Models (Ollama): heavy `nemotron-3-super:cloud` (plan/code/eval), testgen
 ```bash
 uv sync
 ollama pull nemotron-3-super:cloud
+ollama pull nemotron-3-ultra:cloud
 ollama pull gemma4:31b-cloud
 ```
 
@@ -29,52 +36,64 @@ Optional env overrides (`src/agent/llms.py` defaults shown):
 export OLLAMA_HEAVY=nemotron-3-super:cloud OLLAMA_SMALL=gemma4:31b-cloud
 export OLLAMA_TESTGEN=nemotron-3-super:cloud   # testgen model
 export OLLAMA_TESTGEN_THINK=1                  # reasoning on for testgen
+export OLLAMA_EVALUATOR=nemotron-3-ultra:cloud # evaluator-only judge model
+export OLLAMA_EVALUATOR_THINK=1                # reasoning on for the evaluator
 export OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 ## Run
 
+The CLI lives in `src/` (it is not an installed package), so every invocation is
+run through [`uv`](https://docs.astral.sh/uv/) with `PYTHONPATH=src`:
+
 ```bash
-# inline problem
-PYTHONPATH=src uv run python -m cli --problem "Return indices of the two numbers adding to target..."
+uv sync                                   # create/refresh the venv from uv.lock
+PYTHONPATH=src uv run python -m cli ...    # run the agent inside that venv
+```
 
-# from file
-PYTHONPATH=src uv run python -m cli --file problem.md
+`uv run` executes inside the project's managed `.venv` (no manual
+`source .venv/bin/activate` needed), resolving dependencies from `uv.lock`.
+Set the model env vars above first if you want to override the defaults.
 
-# interactive prompt (no args on a TTY; blank line finishes)
-PYTHONPATH=src uv run python -m cli
+### Run modes
 
-# piped stdin still works
-cat problem.md | PYTHONPATH=src uv run python -m cli
+| Mode | Command | Notes |
+| --- | --- | --- |
+| Inline problem | `PYTHONPATH=src uv run python -m cli --problem "Return indices of the two numbers adding to target"` | Quickest one-shot; quote the whole statement. |
+| From a file | `PYTHONPATH=src uv run python -m cli --file problem.md` | Best for long statements / Markdown. |
+| Interactive prompt | `PYTHONPATH=src uv run python -m cli` | No args on a TTY; type the problem, blank line to finish. |
+| Piped stdin | `cat problem.md \| PYTHONPATH=src uv run python -m cli` | Reads all of stdin as the requirement. |
+| Pin the run id | `... --run-id run_id_demo` | Fixes the output filename → `output/run_id_demo.json`. |
+| Status lines only | `... --quiet` | No code/test/diagnosis panels; per-node status lines only. |
+| Full dump | `... --verbose` | Also prints the final code, tests and holdout at the end. |
+| Headless gather | `... --gather-mode quiet` | Validate once, never prompt (auto-default when piped). |
+| Interactive gather | `... --gather-mode interactive` | Force the confirm-and-correct gate even when piped. |
+| Custom output root | `... --out-dir runs/` | Writes `runs/<run_id>.json` instead of `output/`. |
+| Batch dataset | `PYTHONPATH=src uv run python -m cli --problems-file problems.jsonl` | One `{"id","requirement"}` per line; implies quiet; see *Batch dataset*. |
+| Help | `PYTHONPATH=src uv run python -m cli --help` | All flags. |
 
-# pin the run id
-PYTHONPATH=src uv run python -m cli --problem "..." --run-id run_id_demo
+Flags combine freely — e.g. a pinned, headless, verbose run from a file:
 
-# status lines only (no code/test panels)
-PYTHONPATH=src uv run python -m cli --problem "..." --quiet
-
-# headless gather mode: validate once, never prompt (default when piped)
-PYTHONPATH=src uv run python -m cli --problem "..." --gather-mode quiet
-
-# batch dataset: one {id, requirement} per JSONL line -> output/<batch_id>/<id>.json
-PYTHONPATH=src uv run python -m cli --problems-file problems.jsonl
+```bash
+PYTHONPATH=src uv run python -m cli --file problem.md \
+  --run-id run_id_demo --gather-mode quiet --verbose
 ```
 
 Each run streams a status line per node (`✓ intent clear`, `✓ plan`, `✓ tests`,
-`✓ code`, `↻ code retry`, `✓ eval 5/5`, `✓ wrote ...`, with `↻` retries and `⚠`
-blocks) **plus live panels**: the plan + contract (signature/args/returns) after
-the planner, the generated code on every coder attempt, the test cases (with the
-coder-hidden holdout labelled), and per-test input/output result tables after the
-coder self-check and the evaluator. On an interactive terminal a spinner with
+`✓ code`, `✓ eval 5/5`, `↻ eval 3/5 → retry`, `✓ wrote ...`, with `↻` retries and
+`⚠` blocks) **plus live panels**: the plan + contract (signature/args/returns)
+after the planner, the generated code on every coder attempt, the test cases
+(with the coder-hidden holdout labelled), per-test input/output result tables
+after the evaluator, and the evaluator's diagnosis panel (culprit: code vs tests
+— plus the reason). On an interactive terminal a spinner with
 rotating, node-aware phrases and a live seconds timer (`planner: thinking…  (14s)`,
 `coder: writing the solution…  (58s)`) sits at the bottom while each node runs
 (LLM calls block for 90-180s), and every status line ends with that node's
 duration (`✓ plan (3 steps) · 12.4s`). It writes `output/<run_id>.json` with
 requirement, clarified intent, plan, test cases (plus holdout), code, sandbox
-results, eval report, and guardrail verdict.
-
-Add `--quiet` for status lines only, or `--verbose` to also print the full final
-code and tests.
+results, eval report, failure diagnosis, and guardrail verdict.
+`--quiet` (status lines only) and `--verbose` (full final code/tests) are in the
+table above.
 
 ### Gatherer modes
 
@@ -110,7 +129,7 @@ JSON), `1` for infra failures, `2` for bad input.
 ## Test
 
 ```bash
-PYTHONPATH=src uv run pytest -q   # 101 tests (hermetic fallbacks + live-graph E2E)
+PYTHONPATH=src uv run pytest -q   # 103 tests (hermetic fallbacks + live-graph E2E)
 ```
 
 ## Layout

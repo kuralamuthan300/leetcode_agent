@@ -19,6 +19,12 @@ TESTGEN_MODEL = os.getenv("OLLAMA_TESTGEN", HEAVY_MODEL)
 TESTGEN_TIMEOUT_S = int(os.getenv("OLLAMA_TESTGEN_TIMEOUT", str(HEAVY_TIMEOUT_S)))
 TESTGEN_THINK = os.getenv("OLLAMA_TESTGEN_THINK", "1").strip().lower() not in ("0", "false", "no", "")
 
+# The evaluator judges failures (blame + diagnosis) and is deliberately the
+# strongest model in the stack. It is used ONLY by the evaluator node.
+EVALUATOR_MODEL = os.getenv("OLLAMA_EVALUATOR", "nemotron-3-ultra:cloud")
+EVALUATOR_TIMEOUT_S = int(os.getenv("OLLAMA_EVALUATOR_TIMEOUT", "240"))
+EVALUATOR_THINK = os.getenv("OLLAMA_EVALUATOR_THINK", "1").strip().lower() not in ("0", "false", "no", "")
+
 
 def get_small() -> ChatOllama:
     return ChatOllama(
@@ -66,4 +72,21 @@ def get_testgen() -> ChatOllama:
         num_predict=4096,
         reasoning=TESTGEN_THINK,
         client_kwargs={"timeout": TESTGEN_TIMEOUT_S},
+    )
+
+
+def get_evaluator() -> ChatOllama:
+    """Evaluator-only judge model (nemotron-3-ultra by default).
+
+    Used exclusively by the evaluator node to blame failures and diagnose the
+    root cause. Reasoning is on so the verdict is deliberate; the timeout is
+    generous because the ultra model is stronger (and slower) than the rest.
+    """
+    return ChatOllama(
+        model=EVALUATOR_MODEL,
+        base_url=BASE_URL,
+        temperature=0,
+        num_predict=4096,
+        reasoning=EVALUATOR_THINK,
+        client_kwargs={"timeout": EVALUATOR_TIMEOUT_S},
     )

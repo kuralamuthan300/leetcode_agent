@@ -1,12 +1,13 @@
-# Plan — TDD ordering + coder self-loop + blame-aware routing + live terminal output
+# Plan — TDD ordering + evaluator-owned blame/diagnosis + live terminal output
 
-Status: **implemented** (2026-10-18) | Branch: `plan/plan.md`
+Status: **implemented** (2026-10-19) | Branch: `plan/plan.md`
 Companion docs: `architecture.md` (current design), `plans.md` (step history).
-Increments: **1** TDD ordering + coder self-loop + blame-aware routing (below);
-**2** live terminal output (plan/code/test I/O panels); **3** during-node
-narrator (spinner + rotating phrases + live seconds timer); **4** gatherer modes
-(interactive/quiet) + classified aborts + batch dataset driver. See `plans.md`
-Steps 15–18.
+Increments: **1** TDD ordering + coder self-loop + blame-aware routing (largely
+superseded by Increment 5, below); **2** live terminal output (plan/code/test I/O
+panels); **3** during-node narrator (spinner + rotating phrases + live seconds
+timer); **4** gatherer modes (interactive/quiet) + classified aborts + batch
+dataset driver; **5** evaluator-only model + blame/diagnosis routing, no coder
+self-loop, 1 retry. See `plans.md` Steps 15–19.
 
 ## Goal
 
@@ -224,3 +225,57 @@ Quiet verdict ok/assumed/blocking/not-workable/bad-class, truncation abort,
 offline ⇒ `infra_error`, scope gate, quiet routing never re-asks
 (`tests/test_intent.py`); gather-mode resolution, exit codes, batch summary +
 infra-continue + malformed-line handling (`tests/test_cli.py`).
+
+## Increment 5 — Evaluator-owned blame/diagnosis (no coder self-loop)
+
+Goal: make the evaluator the **single decision point** on failures and stop the
+coder from grading itself. One strong model owns judgement; the artifact that is
+*not* at fault is retained.
+
+### Removed
+
+- The coder's inner self-loop: `_route_coder`, `coder_status`,
+  `coder_iterations`, `coder_checks`, and the in-coder `run_matrix` /
+  `_coder_feedback` path. `Coder → Evaluator` is now a plain edge — the coder
+  writes one solution (gated + smoke + code-critic) and hands off.
+
+### Evaluator-only model
+
+- `llms.get_evaluator()` → `nemotron-3-ultra:cloud` (`OLLAMA_EVALUATOR`,
+  `OLLAMA_EVALUATOR_THINK`, `OLLAMA_EVALUATOR_TIMEOUT=240`), used **only** by the
+  evaluator node. `prompts.try_invoke` gains the `"evaluator"` role;
+  `adjudicate()` (per-test blame) and the new `diagnose()` run on it, each falling
+  back to the small model / deterministic blame when unavailable (never a stall).
+
+### Diagnosis + routing
+
+- `diagnose(problem, sig, arg_spec, code, failing, default_blame)` reads the code
+  **and** every failure and returns `{culprit: code|test, reason}`; on failure it
+  returns the dominant per-test blame.
+- The evaluator emits `failure_report{culprit, reason, failing[]}`,
+  `next_action` (`replan_code` | `fix_tests` | `""`), and a readable `feedback`
+  string (fixing the earlier gap where the planner never saw `eval.feedback`).
+- Graph routing retains the unaffected artifact:
+  - `blame=code` → `Planner`; `_route_planner` sees `replan_code` and skips
+    `TestCaseGen`, going straight to `Coder` (**tests retained**).
+  - `blame=test` / empty → `TestCaseGen`; `_route_tests` sees `fix_tests` and
+    skips `Coder`, re-entering `Evaluator` (**code retained**).
+- Retry budget is **1**: `MAX_ITERATIONS = MAX_PLANNER_RETRIES + 1 = 2`
+  (1 original run + 1 retry run).
+
+### State / reporter / CLI
+
+- State: drop `coder_checks`/`coder_iterations`/`coder_status`; add
+  `failure_report` + `next_action`. Reporter emits `failure_report`,
+  `next_action`, `feedback`, and `models{heavy,small,evaluator}`.
+- CLI: drop the coder self-check table and the coder retry/escalate lines;
+  `_next_node` mirrors the new routers; add an **Evaluator diagnosis** panel
+  (culprit + reason + failing ids); eval retry line shows `/{MAX_ITERATIONS}`.
+
+### Tests
+
+`test_evaluator_emits_failure_report`, `test_route_planner_and_tests_retain`,
+`test_route_eval_blame_aware` (budget-aware), `test_diagnose_parses_and_falls_back`,
+coder hands-off (no self-loop), `_render_diagnosis`, updated reporter schema
+(`tests/test_nodes.py`, `test_adjudicate.py`, `test_cli.py`, `test_reporter.py`).
+Full suite: `PYTHONPATH=src uv run pytest -q` (103 passed).

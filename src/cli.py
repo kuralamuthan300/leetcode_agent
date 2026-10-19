@@ -16,7 +16,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from agent.graph import _route_coder, _route_eval, _route_gather, build_graph
+from agent.graph import MAX_ITERATIONS, _route_eval, _route_gather, _route_planner, _route_tests, build_graph
 
 console = Console()
 
@@ -133,6 +133,20 @@ def _render_results(results: list, title: str = "Test results") -> None:
     console.print(table)
 
 
+def _render_diagnosis(report: dict) -> None:
+    """Show the evaluator's failure verdict (code vs tests) plus its reason."""
+    if not report or not report.get("culprit"):
+        return
+    body = Text()
+    body.append("culprit: ", style="bold")
+    body.append(f"{report.get('culprit')}\n")
+    body.append(str(report.get("reason", "")))
+    failing = report.get("failing") or []
+    if failing:
+        body.append(f"\n\nfailed: {', '.join(str(t) for t in failing)}")
+    console.print(Panel(body, title="Evaluator diagnosis", border_style="red"))
+
+
 def _new_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return f"run_id_{ts}_{uuid.uuid4().hex[:6]}"
@@ -180,10 +194,6 @@ def _line(node: str, patch: dict) -> str:
         return f"✓ tests ({len(patch.get('test_cases', []))}){tag}"
     if node == "coder":
         err = (patch.get("coder_smoke") or {}).get("error", "")
-        if patch.get("coder_status") == "retry":
-            return f"↻ code retry ({patch.get('coder_iterations', '?')}/3){tag}"
-        if patch.get("coder_status") == "escalate":
-            return f"↻ code escalate to evaluator{tag}"
         if not err:
             return f"✓ code (smoke ok){tag}"
         if err.startswith("blocked:"):
@@ -194,7 +204,7 @@ def _line(node: str, patch: dict) -> str:
         score = f"{ev.get('passed_count', 0)}/{ev.get('total', 0)}"
         if ev.get("passed"):
             return f"✓ eval {score}{tag}"
-        return f"↻ eval {score} → retry ({patch.get('iterations', '?')}/3){tag}"
+        return f"↻ eval {score} → retry ({patch.get('iterations', '?')}/{MAX_ITERATIONS}){tag}"
     if node == "reporter":
         return f"✓ wrote {patch.get('output_path', '')}"
     return f"· {node}"
@@ -211,11 +221,11 @@ def _next_node(node: str | None, state: dict) -> str | None:
     if node == "gather":
         return _route_gather(state)
     if node == "planner":
-        return "tests"
+        return _route_planner(state)
     if node == "tests":
-        return "coder"
+        return _route_tests(state)
     if node == "coder":
-        return _route_coder(state)
+        return "evaluator"
     if node == "evaluator":
         return _route_eval(state)
     return None
@@ -258,10 +268,10 @@ def _render_patch(node: str, patch: dict, show: bool, attempt: int, elapsed: flo
             _render_tests(patch.get("test_cases", []), patch.get("holdout_tests", []))
         elif node == "coder" and patch.get("code"):
             attempt += 1
-            _render_code(patch["code"], f"code — attempt {attempt} ({patch.get('coder_status', 'pass')})")
-            _render_results(patch.get("coder_checks", []), title="Coder self-check")
+            _render_code(patch["code"], f"code — attempt {attempt}")
         elif node == "evaluator":
             _render_results(patch.get("execution_results", []), title="Test results")
+            _render_diagnosis(patch.get("failure_report", {}))
     return attempt
 
 

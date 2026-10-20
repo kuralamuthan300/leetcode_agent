@@ -11,6 +11,7 @@ def test_defaults_when_file_missing(tmp_path):
     assert set(loaded.models) == set(cfg.MODEL_ROLES)
     assert loaded.models["evaluator"].name == "nemotron-3-ultra"
     assert loaded.agent.max_tests == 10
+    assert loaded.agent.tests_per_category == 2
 
 
 def test_repo_config_parses():
@@ -55,6 +56,7 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_HEAVY_TIMEOUT", "77")
     monkeypatch.setenv("MLFLOW_GATEWAY_URL", "http://gateway.test/v1")
     monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "env-experiment")
+    monkeypatch.setenv("MLFLOW_TESTS_PER_CATEGORY", "3")
     loaded = load_config(path)
     heavy = loaded.models["heavy"]
     assert heavy.name == "from-env"
@@ -63,6 +65,7 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     assert heavy.timeout_s == 77
     assert loaded.gateway.base_url == "http://gateway.test/v1"
     assert loaded.gateway.experiment == "env-experiment"
+    assert loaded.agent.tests_per_category == 3
 
 
 def test_unknown_role_rejected(tmp_path):

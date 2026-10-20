@@ -46,12 +46,13 @@ models:
   heavy:     {name: nemotron-3-super, temperature: 0.2, max_tokens: 4096, timeout_s: 180}
   small:     {name: gemma4,           temperature: 0.0, max_tokens: 4096, timeout_s: 90}
   critic:    {name: nemotron-3-super, temperature: 0.0, max_tokens: 1024, timeout_s: 60}
-  testgen:   {name: nemotron-3-super, temperature: 0.0, max_tokens: 4096, timeout_s: 180}
+  testgen:   {name: nemotron-3-super, temperature: 0.0, max_tokens: 8192, timeout_s: 180}
   evaluator: {name: nemotron-3-ultra, temperature: 0.0, max_tokens: 4096, timeout_s: 240}
 
 agent:
   max_intent_iterations: 3
   max_tests: 10
+  tests_per_category: 2
   holdout_min_tests: 3
   max_planner_retries: 1
 ```
@@ -66,7 +67,7 @@ Environment variables override the file (highest precedence):
 | `MLFLOW_EXPERIMENT_NAME` | `gateway.experiment` |
 | `MLFLOW_HEAVY` / `MLFLOW_SMALL` / `MLFLOW_CRITIC` / `MLFLOW_TESTGEN` / `MLFLOW_EVALUATOR` | role model (endpoint) name |
 | `MLFLOW_<ROLE>_TEMPERATURE` / `_MAX_TOKENS` / `_TIMEOUT` | role knobs, e.g. `MLFLOW_HEAVY_MAX_TOKENS` |
-| `MLFLOW_MAX_INTENT_ITERATIONS` / `MLFLOW_MAX_TESTS` / `MLFLOW_HOLDOUT_MIN_TESTS` / `MLFLOW_MAX_PLANNER_RETRIES` | graph knobs |
+| `MLFLOW_MAX_INTENT_ITERATIONS` / `MLFLOW_MAX_TESTS` / `MLFLOW_TESTS_PER_CATEGORY` / `MLFLOW_HOLDOUT_MIN_TESTS` / `MLFLOW_MAX_PLANNER_RETRIES` | graph knobs |
 | `MLFLOW_AGENT_CONFIG` | path to this YAML file |
 | `MLFLOW_TRACING_DISABLED=1` | turn tracing off |
 | `MLFLOW_EXPERIMENT_ID` | use an existing experiment (skips `set_experiment`) |
@@ -156,7 +157,8 @@ Each run streams a status line per node (`✓ intent clear`, `✓ plan`, `✓ te
 `✓ code`, `✓ eval 5/5`, `↻ eval 3/5 → retry`, `✓ wrote ...`, with `↻` retries and
 `⚠` blocks) **plus live panels**: the plan + contract (signature/args/returns)
 after the planner, the generated code on every coder attempt, the test cases
-(with the coder-hidden holdout labelled), per-test input/output result tables
+(8 total — 2 corner, 2 easy, 2 medium, 2 hard — with one hard test held out and
+labelled), per-test input/output result tables
 after the evaluator, and the evaluator's diagnosis panel (culprit: code vs tests
 — plus the reason). On an interactive terminal a spinner with
 rotating, node-aware phrases and a live seconds timer (`planner: thinking…  (14s)`,

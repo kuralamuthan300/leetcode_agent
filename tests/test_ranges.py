@@ -29,7 +29,7 @@ def test_valid_test_enforces_ranges():
     from agent.nodes import _valid_test
 
     spec = [{"name": "k", "type": "int", "range": "0..10"}]
-    ok = {"id": "t1", "harness": "print(solve(5))", "expected": "5"}
-    bad = {"id": "t2", "harness": "print(solve(99))", "expected": "99"}
+    ok = {"id": "t1", "category": "easy", "harness": "print(solve(5))", "expected": "5"}
+    bad = {"id": "t2", "category": "easy", "harness": "print(solve(99))", "expected": "99"}
     assert _valid_test(ok, None, spec) is not None
     assert _valid_test(bad, None, spec) is None

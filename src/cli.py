@@ -111,11 +111,18 @@ def _render_tests(test_cases: list, holdout_tests: list) -> None:
         return
     table = Table(title="Test cases")
     table.add_column("id", style="bold")
+    table.add_column("category")
     table.add_column("input (harness)")
     table.add_column("expected")
     table.add_column("kind")
     for t, kind in rows:
-        table.add_row(str(t.get("id", "?")), _clip(t.get("harness", "")), _clip(t.get("expected", "")), kind)
+        table.add_row(
+            str(t.get("id", "?")),
+            str(t.get("category", "?")),
+            _clip(t.get("harness", "")),
+            _clip(t.get("expected", "")),
+            kind,
+        )
     console.print(table)
 
 
@@ -492,9 +499,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         console.print("[bold]Code:[/bold]\n" + final.get("code", ""))
         for t in final.get("test_cases", []):
-            console.print(f"[bold]{t['id']}:[/bold] {t['harness']} → {t['expected']}")
+            console.print(
+                f"[bold]{t['id']}[/bold] [dim]({t.get('category', '?')})[/dim]: "
+                f"{t['harness']} → {t['expected']}"
+            )
         for t in final.get("holdout_tests", []):
-            console.print(f"[bold]{t['id']} (holdout):[/bold] {t['harness']} → {t['expected']}")
+            console.print(
+                f"[bold]{t['id']} (holdout)[/bold] [dim]({t.get('category', '?')})[/dim]: "
+                f"{t['harness']} → {t['expected']}"
+            )
     return 1 if final.get("status") == "infra_error" else 0
 
 

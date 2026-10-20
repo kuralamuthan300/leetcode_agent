@@ -11,6 +11,7 @@ from .prompts import (
     CODER_SYSTEM,
     INTENT_SYSTEM,
     PLANNER_SYSTEM,
+    TEST_REPAIR_SYSTEM,
     TESTGEN_SYSTEM,
     args_in_range,
     code_defines_signature,
@@ -19,8 +20,8 @@ from .prompts import (
     extract_code,
     extract_contract,
     extract_json_array,
+    extract_json_object,
     harness_matches,
-    strip_think,
     try_invoke,
     try_invoke_with_fallback,
 )
@@ -29,8 +30,26 @@ from .tracing import tag_run
 
 _AGENT = get_config().agent
 MAX_INTENT_ITERATIONS = _AGENT.max_intent_iterations
-MAX_TESTS = _AGENT.max_tests
+MAX_TESTS = _AGENT.max_tests  # overall safety cap
+TESTS_PER_CATEGORY = _AGENT.tests_per_category
+TEST_CATEGORIES = ("corner", "easy", "medium", "hard")
+TARGET_TESTS = TESTS_PER_CATEGORY * len(TEST_CATEGORIES)
 HOLDOUT_MIN_TESTS = _AGENT.holdout_min_tests  # only split off a holdout when this many tests exist
+
+_CATEGORY_ALIASES = {
+    "boundary": "corner",
+    "boundary_case": "corner",
+    "edge": "corner",
+    "edge_case": "corner",
+    "empty": "corner",
+    "corner_case": "corner",
+    "basic": "easy",
+    "simple": "easy",
+    "moderate": "medium",
+    "complex": "hard",
+    "stress": "hard",
+    "stress_test": "hard",
+}
 
 _CLEAR_KEYWORDS = (
     "input",
@@ -323,13 +342,26 @@ def planner(state: dict) -> dict:
     return out
 
 
-def _valid_test(item: object, sig: str | None = None, arg_spec: list | None = None) -> dict | None:
+def _normalize_category(value: object) -> str:
+    """Canonicalize a test category, mapping common aliases; '' if unknown."""
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    raw = _CATEGORY_ALIASES.get(raw, raw)
+    return raw if raw in TEST_CATEGORIES else ""
+
+
+def _valid_test(
+    item: object,
+    sig: str | None = None,
+    arg_spec: list | None = None,
+    default_category: str | None = None,
+) -> dict | None:
     if not isinstance(item, dict):
         return None
     tid = str(item.get("id", "")).strip()
+    category = _normalize_category(item.get("category")) or _normalize_category(default_category)
     harness = str(item.get("harness", "")).strip()
     expected = item.get("expected", "")
-    if not (tid and harness and isinstance(expected, str) and expected.strip()):
+    if not (tid and category and harness and isinstance(expected, str) and expected.strip()):
         return None
     if "print" not in harness or "solve" not in harness:
         return None
@@ -341,7 +373,56 @@ def _valid_test(item: object, sig: str | None = None, arg_spec: list | None = No
         return None
     if arg_spec and not args_in_range(arg_spec, harness):
         return None
-    return {"id": tid, "harness": harness, "expected": expected.strip()}
+    return {
+        "id": tid,
+        "category": category,
+        "harness": harness,
+        "expected": expected.strip(),
+    }
+
+
+def _select_tests(parsed: list, sig: str | None, arg_spec: list | None) -> list[dict]:
+    """Validate, dedupe, and keep at most `tests_per_category` per category."""
+    buckets: dict[str, list[dict]] = {c: [] for c in TEST_CATEGORIES}
+    seen_ids: set[str] = set()
+    seen_bodies: set[tuple[str, str]] = set()
+    for item in parsed:
+        test = _valid_test(item, sig, arg_spec)
+        if not test:
+            continue
+        body = (test["harness"], test["expected"])
+        if body in seen_bodies:
+            continue
+        bucket = buckets[test["category"]]
+        if len(bucket) >= TESTS_PER_CATEGORY:
+            continue
+        if test["id"] in seen_ids:
+            n = len(bucket) + 1
+            candidate = f"{test['category']}_{n}"
+            while candidate in seen_ids:
+                n += 1
+                candidate = f"{test['category']}_{n}"
+            test["id"] = candidate
+        seen_ids.add(test["id"])
+        seen_bodies.add(body)
+        bucket.append(test)
+    selected = [test for category in TEST_CATEGORIES for test in buckets[category]]
+    return selected[: max(MAX_TESTS, TARGET_TESTS)]
+
+
+def _distribution_issue(tests: list[dict]) -> str:
+    """Explain how a test set misses the required per-category distribution."""
+    counts = {c: sum(1 for t in tests if t.get("category") == c) for c in TEST_CATEGORIES}
+    if all(counts[c] == TESTS_PER_CATEGORY for c in TEST_CATEGORIES):
+        return ""
+    got = ", ".join(f"{c}={counts[c]}" for c in TEST_CATEGORIES)
+    want = ", ".join(f"{c}={TESTS_PER_CATEGORY}" for c in TEST_CATEGORIES)
+    return (
+        f"The previous response had the wrong category distribution ({got}). "
+        f"Return the full set of exactly {TARGET_TESTS} tests with {want}. "
+        "Keep valid tests where possible, use the required category values, and "
+        "do not add extra tests beyond the requested distribution."
+    )
 
 
 def _contract_brief(sig: str, arg_spec: list, returns_spec: str = "") -> str:
@@ -366,6 +447,8 @@ def _invoke_testgen(user: str, system: str) -> str | None:
 
 
 def test_case_gen(state: dict) -> dict:
+    import json as _json
+
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
@@ -375,6 +458,8 @@ def test_case_gen(state: dict) -> dict:
     user = f"Problem:\n{intent}\n\nPlan:\n{plan}\n\n{_contract_brief(sig, arg_spec, state.get('returns_spec', ''))}"
     user += (
         "\nGenerate values strictly within these ranges. "
+        f"Produce exactly {TARGET_TESTS} tests with {TESTS_PER_CATEGORY} per category "
+        "(corner, easy, medium, hard). "
         "Cover boundaries: a minimum-boundary case, a maximum-boundary case, "
         "and an empty-input case only if the contract allows empty."
     )
@@ -389,29 +474,40 @@ def test_case_gen(state: dict) -> dict:
     parsed = extract_json_array(text)
     if not parsed:
         return dict(empty)
-    tests = [t for item in parsed[:MAX_TESTS] if (t := _valid_test(item, sig or None, arg_spec or None))]
+    tests = _select_tests(parsed, sig or None, arg_spec or None)
     overruled = False
-    if tests:
-        import json as _json
 
+    issue = _distribution_issue(tests)
+    if not issue and tests:
         verdict = critique("tests", _json.dumps(tests)[:4000], intent)
         if verdict and not verdict["passed"]:
-            text2 = _invoke_testgen(user + f"\n\nReviewer issues (fix all):\n{verdict['issues']}", TESTGEN_SYSTEM)
-            if text2:
-                parsed2 = extract_json_array(text2)
-                if parsed2:
-                    tests = [t for item in parsed2[:MAX_TESTS] if (t := _valid_test(item, sig or None, arg_spec or None))]
+            issue = f"Reviewer issues (fix all):\n{verdict['issues']}"
+
+    # One corrective pass for an unbalanced distribution or a rejected set.
+    if issue:
+        text2 = _invoke_testgen(user + f"\n\n{issue}", TESTGEN_SYSTEM)
+        if text2:
+            parsed2 = extract_json_array(text2)
+            if parsed2:
+                tests = _select_tests(parsed2, sig or None, arg_spec or None)
+                verdict2 = None
+                if tests:
                     verdict2 = critique("tests", _json.dumps(tests)[:4000], intent)
-                    overruled = bool(verdict2 and not verdict2["passed"])
-                else:
-                    overruled = True
+                overruled = bool(_distribution_issue(tests) or (verdict2 and not verdict2["passed"]))
             else:
                 overruled = True
-    # Hold out one test the coder never sees so the evaluator can catch
+        else:
+            overruled = True
+
+    # Hold out one hard test the coder never sees so the evaluator can catch
     # solutions that merely special-case the visible tests.
     holdout: list[dict] = []
     if len(tests) >= HOLDOUT_MIN_TESTS:
-        holdout = [tests.pop()]
+        holdout_index = next(
+            (i for i in range(len(tests) - 1, -1, -1) if tests[i].get("category") == "hard"),
+            len(tests) - 1,
+        )
+        holdout = [tests.pop(holdout_index)]
     out: dict = {
         "test_cases": tests,
         "holdout_tests": holdout,
@@ -423,31 +519,32 @@ def test_case_gen(state: dict) -> dict:
 
 def repair_test(problem: str, sig: str, arg_spec: list, code: str, test: dict) -> dict | None:
     """Regenerate a single blame=test case; None if the fix is invalid."""
+    category = test.get("category", "")
     user = (
         f"Problem:\n{problem[:2000]}\n\n{_contract_brief(sig, arg_spec, '')}\n\n"
         f"Reference code:\n{code[:2000]}\n\n"
-        f"This test was judged wrong and must be fixed (keep the same id):\n"
+        f"This test was judged wrong and must be fixed (keep id={test['test_id']!r} "
+        f"and category={category!r}):\n"
         f"{test['test_id']}: harness={test['harness'][:500]} expected={test['expected'][:500]!r}"
     )
-    text = try_invoke("small", user, TESTGEN_SYSTEM)
+    text = try_invoke("small", user, TEST_REPAIR_SYSTEM)
     if not text:
         return None
-    import json as _json
-
-    parsed = extract_json_array(text)
-    candidates = parsed if parsed else None
-    if candidates is None:
-        try:
-            one = _json.loads(strip_think(text))
-            candidates = [one] if isinstance(one, dict) else None
-        except (ValueError, AttributeError):
-            candidates = None
+    parsed = extract_json_object(text)
+    candidates = [parsed] if parsed else extract_json_array(text)
     if not candidates:
         return None
-    fixed = _valid_test(candidates[0], sig or None, arg_spec or None)
+    fixed = _valid_test(
+        candidates[0],
+        sig or None,
+        arg_spec or None,
+        default_category=category,
+    )
     if not fixed:
         return None
     fixed["id"] = test["test_id"]
+    if category in TEST_CATEGORIES:
+        fixed["category"] = category
     return fixed
 
 
@@ -649,6 +746,9 @@ def evaluator(state: dict) -> dict:
             continue
         fixed = repair_test(problem, sig, arg_spec, code, {
             "test_id": entry["test_id"],
+            "category": next(
+                (t.get("category", "") for t in tests if t["id"] == entry["test_id"]), ""
+            ),
             "harness": next(t["harness"] for t in tests if t["id"] == entry["test_id"]),
             "expected": entry["expected"],
         })

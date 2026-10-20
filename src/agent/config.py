@@ -50,7 +50,8 @@ class AgentKnobs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_intent_iterations: int = 3
-    max_tests: int = 10
+    max_tests: int = 10  # overall safety cap
+    tests_per_category: int = 2  # corner/easy/medium/hard
     holdout_min_tests: int = 3
     max_planner_retries: int = 1
 
@@ -73,7 +74,7 @@ def default_config() -> AgentConfig:
             "heavy": ModelSettings(name="nemotron-3-super", temperature=0.2, max_tokens=4096, timeout_s=180),
             "small": ModelSettings(name="gemma4", temperature=0.0, max_tokens=4096, timeout_s=90),
             "critic": ModelSettings(name="nemotron-3-super", temperature=0.0, max_tokens=1024, timeout_s=60),
-            "testgen": ModelSettings(name="nemotron-3-super", temperature=0.0, max_tokens=4096, timeout_s=180),
+            "testgen": ModelSettings(name="nemotron-3-super", temperature=0.0, max_tokens=8192, timeout_s=180),
             "evaluator": ModelSettings(name="nemotron-3-ultra", temperature=0.0, max_tokens=4096, timeout_s=240),
         },
         agent=AgentKnobs(),
@@ -147,6 +148,9 @@ def _apply_env(config: AgentConfig) -> AgentConfig:
                 "MLFLOW_MAX_INTENT_ITERATIONS", config.agent.max_intent_iterations
             ),
             "max_tests": _env_int("MLFLOW_MAX_TESTS", config.agent.max_tests),
+            "tests_per_category": _env_int(
+                "MLFLOW_TESTS_PER_CATEGORY", config.agent.tests_per_category
+            ),
             "holdout_min_tests": _env_int(
                 "MLFLOW_HOLDOUT_MIN_TESTS", config.agent.holdout_min_tests
             ),

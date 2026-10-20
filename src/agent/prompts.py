@@ -46,14 +46,34 @@ PLANNER_SYSTEM = (
 
 TESTGEN_SYSTEM = (
     "You write test cases for DSA problems. Given the problem and plan, output "
-    "a JSON array of 3 to 5 test objects. Each object has exactly these keys: "
-    "id (short string), harness (a Python snippet that calls `solve` and MUST "
-    "use print to output the result), expected (the exact printed output as a "
-    "string, never null or an array). Derive `expected` by mentally executing "
-    "the harness step by step — never guess. Example:\n"
-    '[{"id": "base", "harness": "print(solve([2, 7, 11, 15], 9))", '
-    '"expected": "[0, 1]"}]\n'
-    "Reply with ONLY the JSON array, no prose."
+    "a JSON array of exactly 8 test objects: exactly 2 with category \"corner\", "
+    "2 with category \"easy\", 2 with category \"medium\", and 2 with category "
+    "\"hard\". Each object has exactly these keys: id (short string such as "
+    "corner_1 or hard_2), category (one of: corner, easy, medium, hard), harness "
+    "(a Python snippet that calls `solve` and MUST use print to output the "
+    "result), expected (the exact printed output as a string, never null or an "
+    "array). Category meanings: corner = boundary/degenerate inputs (empty only "
+    "if the contract allows it, single element, min/max bounds, duplicates); "
+    "easy = small straightforward examples; medium = typical inputs exercising "
+    "the main logic; hard = large/worst-case inputs stressing complexity and "
+    "tricky structure. Use only values within the contracted ranges. Derive "
+    "`expected` by mentally executing the harness step by step — never guess. "
+    "Example:\n"
+    '[{"id": "easy_1", "category": "easy", '
+    '"harness": "print(solve([2, 7, 11, 15], 9))", "expected": "[0, 1]"}]\n'
+    "Reply with ONLY the JSON array of 8 objects, no prose."
+)
+
+TEST_REPAIR_SYSTEM = (
+    "You fix exactly one test case for a DSA problem. Given the problem, the "
+    "function contract, reference code, and one test judged wrong, reply with "
+    "ONE JSON object with exactly these keys: id (the original id), category "
+    "(the original category), harness (a Python snippet that calls `solve` and "
+    "MUST use print to output the result), expected (the exact printed output as "
+    "a string, never null or an array). Keep the same id and category; change "
+    "only what is needed to make the test correct and within the contracted "
+    "ranges. Derive `expected` by mentally executing the harness — never guess. "
+    "Reply with ONLY the JSON object, no prose."
 )
 
 CODER_SYSTEM = (
@@ -140,11 +160,18 @@ CODE_CHECKLIST = (
     "4. Imports only allowed stdlib modules."
 )
 
-TESTS_CHECKLIST = (
-    "1. At least 3 tests covering base and edge cases. "
-    "2. Every harness calls solve and prints the result. "
-    "3. Expected outputs are plausible for the problem."
-)
+
+def tests_checklist() -> str:
+    """Critic checklist sized to the configured per-category test count."""
+    from .config import get_config
+
+    per = get_config().agent.tests_per_category
+    return (
+        f"1. Exactly {per * 4} tests: {per} corner, {per} easy, {per} medium, {per} hard. "
+        "2. Every test has id, category, harness and expected. "
+        "3. Every harness calls solve, prints the result, and stays within the contract ranges. "
+        "4. Expected outputs are plausible for the problem."
+    )
 
 
 def adjudicate(problem: str, sig: str, arg_spec: list, code: str, test: dict) -> dict:
@@ -240,7 +267,7 @@ def critique(kind: str, artifact: str, context: str = "") -> dict | None:
     """
     from . import llms
 
-    checklists = {"plan": PLAN_CHECKLIST, "code": CODE_CHECKLIST, "tests": TESTS_CHECKLIST}
+    checklists = {"plan": PLAN_CHECKLIST, "code": CODE_CHECKLIST, "tests": tests_checklist()}
     user = f"Checklist:\n{checklists[kind]}\n\nContext:\n{context[:2000]}\n\nArtifact:\n{artifact[:4000]}"
     try:
         msg = llms.get_critic().invoke([("system", CRITIC_SYSTEM), ("human", user)])

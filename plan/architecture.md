@@ -57,7 +57,7 @@ graph TD
   alone). Reasoning is server-side; the gateway returns final content only.
 - `src/agent/llms.py` builds `ChatOpenAI` clients from `src/agent/config.py`:
   `get_small()` temp 0 / 4096 tokens / 90s, `get_heavy()` temp 0.2 / 4096 /
-  180s, `get_critic()` temp 0 / 1024 / 60s, `get_testgen()` temp 0 / 4096 /
+  180s, `get_critic()` temp 0 / 1024 / 60s, `get_testgen()` temp 0 / 8192 /
   180s, `get_evaluator()` temp 0 / 4096 / 240s.
 - `config.yml` holds `gateway`, per-role `models` and `agent` knobs; env vars
   (`MLFLOW_HEAVY`, `MLFLOW_SMALL`, `MLFLOW_CRITIC`, `MLFLOW_TESTGEN`,
@@ -93,11 +93,13 @@ graph TD
    (signature + typed args/ranges + returns; legacy `SIGNATURE:` accepted);
    consumes `feedback` on retry; stub if both models fail.
 3. TestCaseGen (testgen = heavy + `reasoning`, falls back to heavy): LLM JSON
-   `[{id,harness,expected}]` (3-5, harness must `print(solve(...))` with
-   contracted arity and in-range values, boundary coverage) derived from the
-   planner CONTRACT + `feedback` — **never from the coder's code**; validated +
-   guardrail-screened; splits off one **holdout** test (≥3 tests) the coder
-   never sees; `[]` fallback. On a test-blame retry it consumes the evaluator's
+   `[{id,category,harness,expected}]` (exactly 8: 2 corner, 2 easy, 2 medium,
+   2 hard; harness must `print(solve(...))` with contracted arity and in-range
+   values) derived from the planner CONTRACT + `feedback` — **never from the
+   coder's code**; validated, deduped, guardrail-screened and balanced per
+   category (one corrective pass on an unbalanced/rejected set); splits off one
+   **hard holdout** test (≥3 tests) the coder never sees, leaving 7 visible;
+   `[]` fallback. On a test-blame retry it consumes the evaluator's
    `failure_report` feedback, and the graph skips the coder (code retained).
 4. Coder (heavy, small fallback + `python_sandbox` tool): LLM code honoring the
    planner's `function_signature` and the visible `test_cases` (AST-validated,

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 
@@ -10,6 +12,24 @@ def _no_llm(monkeypatch):
     monkeypatch.setattr(llms, "get_critic", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_testgen", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     monkeypatch.setattr(llms, "get_evaluator", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+
+
+def _tests_json(categories=None, harness=None):
+    categories = categories or [
+        "corner", "corner", "easy", "easy", "medium", "medium", "hard", "hard",
+    ]
+    harness = harness or (lambda i: f"print(solve({i}))")
+    counts: dict[str, int] = {}
+    tests = []
+    for i, category in enumerate(categories):
+        counts[category] = counts.get(category, 0) + 1
+        tests.append({
+            "id": f"{category}_{counts[category]}",
+            "category": category,
+            "harness": harness(i),
+            "expected": str(i),
+        })
+    return json.dumps(tests)
 
 
 def test_prompt_parsers():
@@ -139,7 +159,7 @@ def test_testgen_prompt_carries_contract(monkeypatch):
 
     def fake_gen(*a, **k):
         seen["user"] = a[1]
-        return '[{"id": "t1", "harness": "print(solve([1], 0))", "expected": "x"}]'
+        return _tests_json(harness=lambda i: f"print(solve([{i}], {i % 11}))")
 
     monkeypatch.setattr(nodes, "try_invoke", fake_gen)
     out = nodes.test_case_gen({
@@ -152,16 +172,26 @@ def test_testgen_prompt_carries_contract(monkeypatch):
     assert "Contract: def solve(arr, k)" in seen["user"]
     assert "strictly within these ranges" in seen["user"]
     assert "boundary" in seen["user"]
-    assert len(out["test_cases"]) == 1
+    assert "2 per category" in seen["user"]
+    assert "corner, easy, medium, hard" in seen["user"]
+    assert len(out["test_cases"]) == 7
+    assert len(out["holdout_tests"]) == 1
 
 
-def test_valid_test_enforces_arity():
+def test_valid_test_enforces_arity_and_category():
     from agent.nodes import _valid_test
 
-    ok = {"id": "t1", "harness": "print(solve([1, 2], 1))", "expected": "x"}
+    ok = {"id": "t1", "category": "easy", "harness": "print(solve([1, 2], 1))", "expected": "x"}
     assert _valid_test(ok, "def solve(arr, k)") is not None
     assert _valid_test(ok, "def solve(arr)") is None
     assert _valid_test(ok) is not None  # no contract: skip check
+    assert _valid_test(ok)["category"] == "easy"
+
+    alias = {"id": "t2", "category": "edge-case", "harness": "print(solve(1))", "expected": "1"}
+    assert _valid_test(alias)["category"] == "corner"
+    missing = {"id": "t3", "harness": "print(solve(1))", "expected": "1"}
+    assert _valid_test(missing) is None
+    assert _valid_test(missing, default_category="hard")["category"] == "hard"
 
 
 def test_evaluator_replaces_results():
@@ -243,14 +273,83 @@ def test_coder_critic_regen(monkeypatch):
 def test_testgen_critic_regen(monkeypatch):
     import agent.nodes as nodes
 
-    good = '[{"id": "t1", "harness": "print(solve(1))", "expected": "1"}, {"id": "t2", "harness": "print(solve(2))", "expected": "2"}, {"id": "t3", "harness": "print(solve(3))", "expected": "3"}]'
+    good = _tests_json()
     monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: good)
     verdicts = iter([{"passed": False, "issues": "thin"}, {"passed": True, "issues": ""}])
     monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
     out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
-    assert len(out["test_cases"]) == 2
+    assert len(out["test_cases"]) == 7
     assert len(out["holdout_tests"]) == 1
+    assert out["holdout_tests"][0]["category"] == "hard"
     assert "critic_overruled" not in out
+
+
+def test_testgen_corrects_unbalanced_distribution(monkeypatch):
+    import agent.nodes as nodes
+
+    first = json.dumps([{
+        "id": "corner_1",
+        "category": "corner",
+        "harness": "print(solve(1))",
+        "expected": "1",
+    }])
+    calls = []
+
+    def fake_gen(*a, **k):
+        calls.append(a[1])
+        return first if len(calls) == 1 else _tests_json()
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    assert len(calls) == 2
+    assert "wrong category distribution" in calls[1]
+    assert len(out["test_cases"]) == 7
+    assert len(out["holdout_tests"]) == 1
+
+
+def test_testgen_caps_each_category(monkeypatch):
+    import agent.nodes as nodes
+
+    categories = ["corner"] * 3 + ["easy"] * 2 + ["medium"] * 2 + ["hard"] * 2
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: _tests_json(categories))
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    all_tests = out["test_cases"] + out["holdout_tests"]
+    counts = {category: sum(1 for t in all_tests if t["category"] == category)
+              for category in nodes.TEST_CATEGORIES}
+    assert counts == {"corner": 2, "easy": 2, "medium": 2, "hard": 2}
+    assert len(all_tests) == 8
+
+
+def test_repair_test_keeps_id_and_category(monkeypatch):
+    import agent.nodes as nodes
+    from agent.prompts import TEST_REPAIR_SYSTEM
+
+    seen = {}
+
+    def fake_invoke(kind, user, system, retries=1):
+        seen["system"] = system
+        return json.dumps({
+            "id": "ignored",
+            "category": "hard",
+            "harness": "print(solve(9))",
+            "expected": "9",
+        })
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_invoke)
+    fixed = nodes.repair_test(
+        "identity",
+        "def solve(a)",
+        [],
+        "def solve(a):\n    return a\n",
+        {"test_id": "hard_1", "category": "hard", "harness": "print(solve(1))", "expected": "0"},
+    )
+    assert seen["system"] == TEST_REPAIR_SYSTEM
+    assert fixed == {
+        "id": "hard_1",
+        "category": "hard",
+        "harness": "print(solve(9))",
+        "expected": "9",
+    }
 
 
 def test_evaluator_short_circuits_on_smoke_failure():
@@ -349,7 +448,7 @@ def test_testgen_ignores_code_reference(monkeypatch):
 
     def fake_gen(*a, **k):
         seen["user"] = a[1]
-        return '[{"id": "t1", "harness": "print(solve([1], 0))", "expected": "x"}]'
+        return _tests_json(harness=lambda i: f"print(solve([{i}], 0))")
 
     monkeypatch.setattr(nodes, "try_invoke", fake_gen)
     nodes.test_case_gen({

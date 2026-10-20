@@ -63,10 +63,10 @@ def test_evaluator_records_blame():
 def test_repair_test_only_path(monkeypatch):
     import agent.nodes as nodes
 
-    fixed_json = '[{"id": "t1", "harness": "print(solve(1, 2))", "expected": "3"}]'
+    fixed_json = '[{"id": "t1", "category": "easy", "harness": "print(solve(1, 2))", "expected": "3"}]'
     monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: fixed_json)
     code = "def solve(a, b):\n    return a + b\n"
-    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    tests = [{"id": "t1", "category": "easy", "harness": "print(solve([1]))", "expected": "3"}]
     out = nodes.evaluator({
         "code": code,
         "test_cases": tests,
@@ -85,7 +85,7 @@ def test_repair_invalid_keeps_failure(monkeypatch):
 
     monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: "not json at all {{{")
     code = "def solve(a, b):\n    return a + b\n"
-    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    tests = [{"id": "t1", "category": "easy", "harness": "print(solve([1]))", "expected": "3"}]
     out = nodes.evaluator({
         "code": code,
         "test_cases": tests,
@@ -101,10 +101,10 @@ def test_repair_invalid_keeps_failure(monkeypatch):
 def test_repair_still_failing_escalates(monkeypatch):
     import agent.nodes as nodes
 
-    bad_json = '[{"id": "t1", "harness": "print(solve(1, 1))", "expected": "999"}]'
+    bad_json = '[{"id": "t1", "category": "easy", "harness": "print(solve(1, 1))", "expected": "999"}]'
     monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: bad_json)
     code = "def solve(a, b):\n    return a + b\n"
-    tests = [{"id": "t1", "harness": "print(solve([1]))", "expected": "3"}]
+    tests = [{"id": "t1", "category": "easy", "harness": "print(solve([1]))", "expected": "3"}]
     out = nodes.evaluator({
         "code": code,
         "test_cases": tests,

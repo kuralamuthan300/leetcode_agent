@@ -44,24 +44,51 @@ PLANNER_SYSTEM = (
     "Reply with ONLY the plan lines plus the contract block."
 )
 
-TESTGEN_SYSTEM = (
-    "You write test cases for DSA problems. Given the problem and plan, output "
-    "a JSON array of exactly 8 test objects: exactly 2 with category \"corner\", "
-    "2 with category \"easy\", 2 with category \"medium\", and 2 with category "
-    "\"hard\". Each object has exactly these keys: id (short string such as "
-    "corner_1 or hard_2), category (one of: corner, easy, medium, hard), harness "
-    "(a Python snippet that calls `solve` and MUST use print to output the "
-    "result), expected (the exact printed output as a string, never null or an "
-    "array). Category meanings: corner = boundary/degenerate inputs (empty only "
-    "if the contract allows it, single element, min/max bounds, duplicates); "
-    "easy = small straightforward examples; medium = typical inputs exercising "
-    "the main logic; hard = large/worst-case inputs stressing complexity and "
-    "tricky structure. Use only values within the contracted ranges. Derive "
-    "`expected` by mentally executing the harness step by step — never guess. "
-    "Example:\n"
-    '[{"id": "easy_1", "category": "easy", '
-    '"harness": "print(solve([2, 7, 11, 15], 9))", "expected": "[0, 1]"}]\n'
-    "Reply with ONLY the JSON array of 8 objects, no prose."
+def testgen_system() -> str:
+    """Test-generation system prompt sized to the configured category count."""
+    from .config import get_config
+
+    per = max(1, get_config().agent.tests_per_category)
+    total = per * 4
+    return (
+        "You write test cases for DSA problems. Given the problem and plan, output "
+        f"a JSON array of exactly {total} test objects: exactly {per} with category "
+        f"\"corner\", {per} with category \"easy\", {per} with category \"medium\", "
+        f"and {per} with category \"hard\". Each object has exactly these keys: id "
+        "(short string such as corner_1 or hard_2), category (one of: corner, "
+        "easy, medium, hard), harness (a Python snippet that calls `solve` and "
+        "MUST use print to output the result), expected (the exact printed output "
+        "as a string, never null or an array). Category meanings: corner = "
+        "boundary/degenerate inputs (empty only if the contract allows it, single "
+        "element, min/max bounds, duplicates); easy = small straightforward "
+        "examples; medium = typical inputs exercising the main logic; hard = "
+        "large/worst-case inputs stressing complexity and tricky structure. Use "
+        "only values within the contracted ranges. For nested structures, make "
+        "the harness construct exactly the contracted dimensionality. Derive "
+        "`expected` by mentally executing the harness step by step — never guess. "
+        "Before replying, verify the JSON is syntactically valid: every key and "
+        "string is quoted, and every brace/bracket is closed. Example:\n"
+        '[{"id": "easy_1", "category": "easy", '
+        '"harness": "print(solve([2, 7, 11, 15], 9))", "expected": "[0, 1]"}]\n'
+        f"Reply with ONLY the JSON array of {total} objects, no prose."
+    )
+
+TEST_FILL_SYSTEM = (
+    "You add missing test cases for a DSA problem. Given the problem, the "
+    "contract, tests already accepted, and the exact missing category counts, "
+    "output a JSON array containing ONLY the requested missing tests. Each "
+    "object has exactly these keys: id (short string), category (one of: "
+    "corner, easy, medium, hard), harness (a syntactically valid Python snippet "
+    "that calls `solve` and MUST use print to output the result), expected (the "
+    "exact printed output as a string, never null or an array). Category "
+    "meanings: corner = boundary/degenerate inputs; easy = small straightforward "
+    "examples; medium = typical inputs; hard = large/worst-case inputs. Use "
+    "only values within the contracted ranges. For nested structures, make the "
+    "harness construct exactly the contracted dimensionality. Derive `expected` "
+    "by mentally executing the harness step by step — never guess. Before "
+    "replying, verify the JSON is syntactically valid: every key and string is "
+    "quoted, and every brace/bracket is closed. Reply with ONLY the JSON array, "
+    "no prose."
 )
 
 TEST_REPAIR_SYSTEM = (
@@ -295,15 +322,35 @@ def extract_code(text: str) -> str:
 
 
 def extract_json_array(text: str) -> list | None:
-    """Parse a JSON array from raw or fenced LLM output; None if unparseable."""
+    """Parse a JSON array from raw or fenced LLM output; None if unparseable.
+
+    Fenced blocks are parsed as a whole (never truncated at the first `]`, which
+    would break nested list literals inside test harnesses). Raw output falls
+    back to the first `[` so trailing prose is tolerated.
+    """
     text = strip_think(text)
-    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, flags=re.DOTALL)
-    candidate = m.group(1) if m else text.strip()
-    try:
-        parsed = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, list) else None
+    candidates = []
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
+    if m:
+        candidates.append(m.group(1))
+    candidates.append(text.strip())
+    start = text.find("[")
+    if start != -1:
+        candidates.append(text[start:])
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(candidate)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if isinstance(parsed, list):
+            return parsed
+    return None
 
 
 def extract_json_object(text: str) -> dict | None:

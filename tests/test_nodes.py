@@ -38,6 +38,16 @@ def test_prompt_parsers():
     assert strip_think("<think>hmm</think>answer") == "answer"
     assert "def solve" in extract_code("```python\ndef solve(): pass\n```")
     assert extract_json_array('[{"id": "t1"}]') == [{"id": "t1"}]
+    nested = (
+        '```json\n[{"id": "t1", "category": "easy", '
+        '"harness": "print(solve([[1]]))", "expected": "[[1]]"}]\n```'
+    )
+    assert extract_json_array(nested) == [{
+        "id": "t1",
+        "category": "easy",
+        "harness": "print(solve([[1]]))",
+        "expected": "[[1]]",
+    }]
     assert extract_json_array("not json") is None
 
 
@@ -178,6 +188,42 @@ def test_testgen_prompt_carries_contract(monkeypatch):
     assert len(out["holdout_tests"]) == 1
 
 
+def test_testgen_system_uses_configured_count(monkeypatch):
+    from agent import config as config_mod
+    from agent.prompts import testgen_system
+
+    monkeypatch.setenv("MLFLOW_TESTS_PER_CATEGORY", "3")
+    config_mod.reload_config()
+    text = testgen_system()
+    assert "exactly 12 test objects" in text
+    assert 'exactly 3 with category "corner"' in text
+    assert 'and 3 with category "hard"' in text
+    assert "exactly 8 test objects" not in text
+
+
+def test_testgen_critic_sees_compact_complete_artifact(monkeypatch):
+    import agent.nodes as nodes
+
+    seen = {}
+
+    def fake_critique(kind, artifact, context):
+        seen["artifact"] = artifact
+        return {"passed": True, "issues": ""}
+
+    long_harness = lambda i: f"print(solve([[[[{i}]]]]))\n" + "#" * 500
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: _tests_json(harness=long_harness))
+    monkeypatch.setattr(nodes, "critique", fake_critique)
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    artifact = seen["artifact"]
+    all_tests = out["test_cases"] + out["holdout_tests"]
+    assert len(all_tests) == 8
+    assert len(artifact) < 4000
+    assert "[{" not in artifact
+    for test in all_tests:
+        assert test["id"] in artifact
+        assert test["category"] in artifact
+
+
 def test_valid_test_enforces_arity_and_category():
     from agent.nodes import _valid_test
 
@@ -192,6 +238,8 @@ def test_valid_test_enforces_arity_and_category():
     missing = {"id": "t3", "harness": "print(solve(1))", "expected": "1"}
     assert _valid_test(missing) is None
     assert _valid_test(missing, default_category="hard")["category"] == "hard"
+    broken = {"id": "t4", "category": "easy", "harness": "print(solve(1)", "expected": "1"}
+    assert _valid_test(broken) is None
 
 
 def test_evaluator_replaces_results():
@@ -284,6 +332,31 @@ def test_testgen_critic_regen(monkeypatch):
     assert "critic_overruled" not in out
 
 
+def test_testgen_critic_correction_on_last_attempt(monkeypatch):
+    """A final-attempt critic rejection still gets one bounded correction."""
+    import agent.nodes as nodes
+
+    calls = []
+
+    def fake_gen(*a, **k):
+        calls.append(a[1])
+        return _tests_json()
+
+    verdicts = iter([
+        {"passed": False, "issues": "thin"},
+        {"passed": False, "issues": "still thin"},
+        {"passed": False, "issues": "still thin"},
+        {"passed": True, "issues": ""},
+    ])
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    monkeypatch.setattr(nodes, "critique", lambda *a, **k: next(verdicts))
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    assert len(calls) == 4
+    assert "Reviewer issues (fix all)" in calls[3]
+    assert len(out["test_cases"]) + len(out["holdout_tests"]) == 8
+    assert "critic_overruled" not in out
+
+
 def test_testgen_corrects_unbalanced_distribution(monkeypatch):
     import agent.nodes as nodes
 
@@ -318,6 +391,66 @@ def test_testgen_caps_each_category(monkeypatch):
               for category in nodes.TEST_CATEGORIES}
     assert counts == {"corner": 2, "easy": 2, "medium": 2, "hard": 2}
     assert len(all_tests) == 8
+
+
+def test_testgen_repairs_extra_closing_parens(monkeypatch):
+    import agent.nodes as nodes
+
+    # The model often emits one extra `)` around nested 4-D list literals.
+    harness = lambda i: f"print(solve({i})))"
+    monkeypatch.setattr(nodes, "try_invoke", lambda *a, **k: _tests_json(harness=harness))
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    all_tests = out["test_cases"] + out["holdout_tests"]
+    assert len(all_tests) == 8
+    assert {t["category"] for t in all_tests} == {"corner", "easy", "medium", "hard"}
+    assert all(t["harness"] == f"print(solve({i}))" for i, t in enumerate(all_tests))
+
+
+def test_testgen_retries_malformed_fill(monkeypatch):
+    import agent.nodes as nodes
+
+    first = json.dumps([{
+        "id": "corner_1",
+        "category": "corner",
+        "harness": "print(solve(1))",
+        "expected": "1",
+    }])
+    calls = []
+
+    def fake_gen(*a, **k):
+        calls.append(a[1])
+        if len(calls) == 1:
+            return first
+        if len(calls) == 2:
+            return "not a json array"
+        return _tests_json()
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    all_tests = out["test_cases"] + out["holdout_tests"]
+    assert len(calls) == 3
+    assert "could not be parsed" in calls[2]
+    assert len(all_tests) == 8
+
+
+def test_testgen_fill_reports_validation_errors(monkeypatch):
+    import agent.nodes as nodes
+
+    first = json.dumps([
+        {"id": "corner_1", "category": "corner", "harness": "print(solve(1))", "expected": "1"},
+        {"id": "broken", "harness": "print(solve(2))", "expected": "2"},
+    ])
+    calls = []
+
+    def fake_gen(*a, **k):
+        calls.append(a[1])
+        return first if len(calls) == 1 else _tests_json()
+
+    monkeypatch.setattr(nodes, "try_invoke", fake_gen)
+    out = nodes.test_case_gen({"clarified_intent": "identity", "plan_steps": []})
+    assert len(calls) == 2
+    assert "missing or unknown category" in calls[1]
+    assert len(out["test_cases"]) + len(out["holdout_tests"]) == 8
 
 
 def test_repair_test_keeps_id_and_category(monkeypatch):

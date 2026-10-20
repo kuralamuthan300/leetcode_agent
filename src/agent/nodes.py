@@ -11,8 +11,8 @@ from .prompts import (
     CODER_SYSTEM,
     INTENT_SYSTEM,
     PLANNER_SYSTEM,
+    TEST_FILL_SYSTEM,
     TEST_REPAIR_SYSTEM,
-    TESTGEN_SYSTEM,
     args_in_range,
     code_defines_signature,
     critique,
@@ -22,6 +22,7 @@ from .prompts import (
     extract_json_array,
     extract_json_object,
     harness_matches,
+    testgen_system,
     try_invoke,
     try_invoke_with_fallback,
 )
@@ -34,6 +35,7 @@ MAX_TESTS = _AGENT.max_tests  # overall safety cap
 TESTS_PER_CATEGORY = _AGENT.tests_per_category
 TEST_CATEGORIES = ("corner", "easy", "medium", "hard")
 TARGET_TESTS = TESTS_PER_CATEGORY * len(TEST_CATEGORIES)
+MAX_TESTGEN_ATTEMPTS = 4  # initial generation + two fills + one critic correction
 HOLDOUT_MIN_TESTS = _AGENT.holdout_min_tests  # only split off a holdout when this many tests exist
 
 _CATEGORY_ALIASES = {
@@ -349,53 +351,96 @@ def _normalize_category(value: object) -> str:
     return raw if raw in TEST_CATEGORIES else ""
 
 
+def _repair_trailing_parens(harness: str) -> str | None:
+    """Strip extra trailing `)` characters from a harness that almost compiles."""
+    candidate = harness.rstrip()
+    while candidate.endswith(")"):
+        candidate = candidate[:-1].rstrip()
+        try:
+            compile(candidate, "<test>", "exec")
+        except SyntaxError:
+            continue
+        return candidate
+    return None
+
+
+def _validate_test(
+    item: object,
+    sig: str | None = None,
+    arg_spec: list | None = None,
+    default_category: str | None = None,
+) -> tuple[dict | None, str]:
+    """Validate one test; return (normalized test, "") or (None, reason)."""
+    if not isinstance(item, dict):
+        return None, "not a JSON object"
+    tid = str(item.get("id", "")).strip()
+    if not tid:
+        return None, "missing id"
+    category = _normalize_category(item.get("category")) or _normalize_category(default_category)
+    if not category:
+        return None, "missing or unknown category"
+    harness = str(item.get("harness", "")).strip()
+    if not harness:
+        return None, "missing harness"
+    expected = item.get("expected", "")
+    if not (isinstance(expected, str) and expected.strip()):
+        return None, "expected must be a non-empty string"
+    if "print" not in harness or "solve" not in harness:
+        return None, "harness must call solve and print the result"
+    try:
+        compile(harness, "<test>", "exec")
+    except SyntaxError as exc:
+        # Models commonly add one extra `)` around deeply nested list literals.
+        paren_error = "paren" in exc.msg.lower() or "unmatched" in exc.msg.lower()
+        repaired = _repair_trailing_parens(harness) if paren_error else None
+        if repaired is None:
+            return None, f"harness SyntaxError: {exc.msg}"
+        harness = repaired
+    from .tools.guardrail import check
+
+    gate = check("", harness)
+    if not gate["allowed"]:
+        reasons = "; ".join(gate.get("reasons", [])[:2]) or "blocked"
+        return None, f"guardrail blocked: {reasons}"
+    if sig and not harness_matches(harness, sig):
+        return None, "harness does not match the contracted signature"
+    if arg_spec and not args_in_range(arg_spec, harness):
+        return None, "harness arguments are outside the contracted range"
+    return {
+        "id": tid,
+        "category": category,
+        "harness": harness,
+        "expected": expected.strip(),
+    }, ""
+
+
 def _valid_test(
     item: object,
     sig: str | None = None,
     arg_spec: list | None = None,
     default_category: str | None = None,
 ) -> dict | None:
-    if not isinstance(item, dict):
-        return None
-    tid = str(item.get("id", "")).strip()
-    category = _normalize_category(item.get("category")) or _normalize_category(default_category)
-    harness = str(item.get("harness", "")).strip()
-    expected = item.get("expected", "")
-    if not (tid and category and harness and isinstance(expected, str) and expected.strip()):
-        return None
-    if "print" not in harness or "solve" not in harness:
-        return None
-    from .tools.guardrail import check
-
-    if not check("", harness)["allowed"]:
-        return None
-    if sig and not harness_matches(harness, sig):
-        return None
-    if arg_spec and not args_in_range(arg_spec, harness):
-        return None
-    return {
-        "id": tid,
-        "category": category,
-        "harness": harness,
-        "expected": expected.strip(),
-    }
+    return _validate_test(item, sig, arg_spec, default_category)[0]
 
 
-def _select_tests(parsed: list, sig: str | None, arg_spec: list | None) -> list[dict]:
+def _select_tests(
+    parsed: list,
+    sig: str | None,
+    arg_spec: list | None,
+    existing: list[dict] | None = None,
+) -> list[dict]:
     """Validate, dedupe, and keep at most `tests_per_category` per category."""
     buckets: dict[str, list[dict]] = {c: [] for c in TEST_CATEGORIES}
     seen_ids: set[str] = set()
     seen_bodies: set[tuple[str, str]] = set()
-    for item in parsed:
-        test = _valid_test(item, sig, arg_spec)
-        if not test:
-            continue
+
+    def add(test: dict) -> None:
         body = (test["harness"], test["expected"])
         if body in seen_bodies:
-            continue
+            return
         bucket = buckets[test["category"]]
         if len(bucket) >= TESTS_PER_CATEGORY:
-            continue
+            return
         if test["id"] in seen_ids:
             n = len(bucket) + 1
             candidate = f"{test['category']}_{n}"
@@ -406,6 +451,15 @@ def _select_tests(parsed: list, sig: str | None, arg_spec: list | None) -> list[
         seen_ids.add(test["id"])
         seen_bodies.add(body)
         bucket.append(test)
+
+    for test in existing or []:
+        category = _normalize_category(test.get("category"))
+        if category:
+            add({**test, "category": category})
+    for item in parsed:
+        test = _valid_test(item, sig, arg_spec)
+        if test:
+            add(test)
     selected = [test for category in TEST_CATEGORIES for test in buckets[category]]
     return selected[: max(MAX_TESTS, TARGET_TESTS)]
 
@@ -423,6 +477,53 @@ def _distribution_issue(tests: list[dict]) -> str:
         "Keep valid tests where possible, use the required category values, and "
         "do not add extra tests beyond the requested distribution."
     )
+
+
+def _rejection_details(parsed: list, sig: str | None, arg_spec: list | None) -> str:
+    """Render per-test validation errors from the last generation attempt."""
+    lines = []
+    for item in parsed or []:
+        _, error = _validate_test(item, sig, arg_spec)
+        if error:
+            tid = item.get("id", "?") if isinstance(item, dict) else "?"
+            lines.append(f"- {tid}: {error}")
+    return "\n".join(lines[:8])
+
+
+def _fill_instructions(
+    tests: list[dict],
+    parsed: list | None,
+    sig: str | None,
+    arg_spec: list | None,
+    parse_error: str = "",
+) -> str:
+    """Prompt fragment asking only for the categories still missing."""
+    counts = {c: sum(1 for t in tests if t.get("category") == c) for c in TEST_CATEGORIES}
+    missing = {c: max(0, TESTS_PER_CATEGORY - counts[c]) for c in TEST_CATEGORIES}
+    missing_total = sum(missing.values())
+    lines = [_distribution_issue(tests)]
+    lines.append(
+        f"Return ONLY {missing_total} new test(s): "
+        + ", ".join(f"{c}={n}" for c, n in missing.items() if n)
+        + "."
+    )
+    if tests:
+        accepted = "\n".join(
+            f"- {t['id']} [{t['category']}]: {t['harness'][:240]} -> {t['expected'][:80]}"
+            for t in tests[:8]
+        )
+        lines.append("Already accepted (do not duplicate these):\n" + accepted)
+    if parse_error:
+        lines.append(parse_error)
+    else:
+        details = _rejection_details(parsed or [], sig, arg_spec)
+        if details:
+            lines.append(
+                "Rejected candidates from the previous response "
+                "(harnesses must be valid Python with balanced parentheses/brackets):\n"
+                + details
+            )
+    return "\n\n".join(line for line in lines if line)
 
 
 def _contract_brief(sig: str, arg_spec: list, returns_spec: str = "") -> str:
@@ -446,9 +547,20 @@ def _invoke_testgen(user: str, system: str) -> str | None:
     return try_invoke("heavy", user, system)
 
 
-def test_case_gen(state: dict) -> dict:
-    import json as _json
+def _tests_artifact(tests: list[dict]) -> str:
+    """Compact test summary for the critic (never truncated mid-JSON)."""
+    categories = ", ".join(f"{c}={sum(1 for t in tests if t['category'] == c)}" for c in TEST_CATEGORIES)
+    lines = [f"{len(tests)} tests ({categories}):"]
+    for t in tests:
+        harness = t["harness"].replace("\n", "\\n")
+        lines.append(
+            f"- {t['id']} [{t['category']}] harness={harness[:260]} "
+            f"expected={t['expected'][:80]!r}"
+        )
+    return "\n".join(lines)
 
+
+def test_case_gen(state: dict) -> dict:
     intent = state.get("clarified_intent", "")
     plan = "\n".join(state.get("plan_steps", []))
     sig = state.get("function_signature", "")
@@ -467,37 +579,50 @@ def test_case_gen(state: dict) -> dict:
         user += f"\n\nCall the function exactly as contracted: {sig}"
     if feedback:
         user += f"\n\nPrevious tests were rejected — fix them:\n{feedback[:1000]}"
-    text = _invoke_testgen(user, TESTGEN_SYSTEM)
     empty = {"test_cases": [], "holdout_tests": []}
-    if not text:
-        return dict(empty)
-    parsed = extract_json_array(text)
-    if not parsed:
-        return dict(empty)
-    tests = _select_tests(parsed, sig or None, arg_spec or None)
+    tests: list[dict] = []
+    parsed: list | None = None
+    parse_error = ""
+    critic_issue = ""
     overruled = False
 
-    issue = _distribution_issue(tests)
-    if not issue and tests:
-        verdict = critique("tests", _json.dumps(tests)[:4000], intent)
-        if verdict and not verdict["passed"]:
-            issue = f"Reviewer issues (fix all):\n{verdict['issues']}"
-
-    # One corrective pass for an unbalanced distribution or a rejected set.
-    if issue:
-        text2 = _invoke_testgen(user + f"\n\n{issue}", TESTGEN_SYSTEM)
-        if text2:
-            parsed2 = extract_json_array(text2)
-            if parsed2:
-                tests = _select_tests(parsed2, sig or None, arg_spec or None)
-                verdict2 = None
-                if tests:
-                    verdict2 = critique("tests", _json.dumps(tests)[:4000], intent)
-                overruled = bool(_distribution_issue(tests) or (verdict2 and not verdict2["passed"]))
-            else:
-                overruled = True
+    for attempt in range(MAX_TESTGEN_ATTEMPTS):
+        if attempt == 0:
+            prompt, system = user, testgen_system()
+        elif critic_issue:
+            prompt = user + f"\n\nReviewer issues (fix all):\n{critic_issue}"
+            system = testgen_system()
+            critic_issue = ""
         else:
-            overruled = True
+            prompt = user + "\n\n" + _fill_instructions(
+                tests, parsed, sig or None, arg_spec or None, parse_error
+            )
+            system = TEST_FILL_SYSTEM
+
+        text = _invoke_testgen(prompt, system)
+        parsed = extract_json_array(text) if text else None
+        parse_error = ""
+        if not text:
+            parse_error = "The previous response was empty. Return only a valid JSON array."
+        elif parsed is None:
+            parse_error = "The previous response could not be parsed as a valid JSON array."
+        if parsed:
+            tests = _select_tests(parsed, sig or None, arg_spec or None, existing=tests)
+
+        if _distribution_issue(tests):
+            if attempt == MAX_TESTGEN_ATTEMPTS - 1:
+                overruled = True
+            continue
+        verdict = critique("tests", _tests_artifact(tests), intent)
+        if verdict and not verdict["passed"]:
+            critic_issue = verdict["issues"]
+            if attempt == MAX_TESTGEN_ATTEMPTS - 1:
+                overruled = True
+            continue
+        break
+
+    if not tests:
+        return dict(empty)
 
     # Hold out one hard test the coder never sees so the evaluator can catch
     # solutions that merely special-case the visible tests.

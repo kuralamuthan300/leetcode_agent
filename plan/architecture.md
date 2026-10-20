@@ -93,13 +93,16 @@ graph TD
    (signature + typed args/ranges + returns; legacy `SIGNATURE:` accepted);
    consumes `feedback` on retry; stub if both models fail.
 3. TestCaseGen (testgen = heavy + `reasoning`, falls back to heavy): LLM JSON
-   `[{id,category,harness,expected}]` (exactly 8: 2 corner, 2 easy, 2 medium,
-   2 hard; harness must `print(solve(...))` with contracted arity and in-range
-   values) derived from the planner CONTRACT + `feedback` — **never from the
-   coder's code**; validated, deduped, guardrail-screened and balanced per
-   category (one corrective pass on an unbalanced/rejected set); splits off one
-   **hard holdout** test (≥3 tests) the coder never sees, leaving 7 visible;
-   `[]` fallback. On a test-blame retry it consumes the evaluator's
+   `[{id,category,harness,expected}]` (exactly 8 by default: 2 corner, 2 easy,
+   2 medium, 2 hard — configurable via `agent.tests_per_category`; harness must
+   `print(solve(...))` with contracted arity and in-range values) derived from
+   the planner CONTRACT + `feedback` — **never from the coder's code**;
+   validated (including Python syntax), deduped, guardrail-screened and balanced
+   per category. Incomplete or malformed responses trigger up to three bounded
+   corrective passes: targeted fills for missing categories, with rejected-test
+   reasons fed back, then one final critic correction. Splits off one **hard
+   holdout** test (≥3 tests) the coder never sees, leaving 7 visible; `[]`
+   fallback. On a test-blame retry it consumes the evaluator's
    `failure_report` feedback, and the graph skips the coder (code retained).
 4. Coder (heavy, small fallback + `python_sandbox` tool): LLM code honoring the
    planner's `function_signature` and the visible `test_cases` (AST-validated,

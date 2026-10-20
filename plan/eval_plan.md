@@ -2,10 +2,17 @@
 
 **Goal:** turn `evals/golden_dataset.csv` (50 problems × base/edge/adversarial = 150 cases)
 into a repeatable scorecard that measures the agent's *outcome*, its *self-grading
-calibration*, its *test-generation strength*, and its *operating cost*.
+calibration*, its *test-generation strength*, and its *operating cost* — with
+**MLflow as the system of record** (dataset versioning, traces, per-row assessments,
+metrics, artifacts, and run-to-run comparison).
 
 **Design rule:** the agent's own `eval` verdict and the golden verdict are two
 different measurements. Never collapse them.
+
+**MLflow rule:** deterministic code execution and grading stay in our sandbox;
+MLflow owns dataset versions, per-row scoring/assessments, aggregation, artifacts,
+and comparison. `mlflow.genai.evaluate` orchestrates scoring over **precomputed**
+outputs so it never re-runs the agent or untrusted code.
 
 ---
 
@@ -35,7 +42,212 @@ status, and `iterations` (1 vs 2).
 
 ---
 
-## 2. Target layout
+## 2. MLflow integration design
+
+MLflow **3.17.1** is already installed, and the agent already emits
+`mlflow.langchain.autolog` traces tagged with `run_id`. The eval framework adds a
+second, versioned layer on top; it does not replace the agent's tracing.
+
+### 2.1 Objects and run hierarchy
+
+| Object | Name | Purpose |
+|---|---|---|
+| Experiment (existing) | `leetcodeagent` | Agent traces, one trace per solve |
+| Experiment (new) | `leetcodeagent-evals` | Scorecard runs, datasets, assessments |
+| GenAI dataset | `leetcode-golden-v1` | 50 records, versioned by digest |
+| Parent eval run | `eval_<batch_id>` | Params, 10 metrics, gates, artifacts |
+| Nested stage runs | `prepare` / `grade` / `mutation` / `report` | Optional isolation of stage failures |
+| Trace (existing) | `<run_id> · <problem>` | Receives per-problem feedback assessments |
+
+**Parent run tags:**
+
+```text
+eval.kind=scorecard
+eval.batch_id=<batch_id>
+eval.dataset_id=<id>
+eval.dataset_version=<n>
+eval.dataset_hash=<sha256>
+eval.git_sha=<sha>
+eval.config_hash=<sha256>
+eval.models=heavy:nemotron-3-super,testgen:...,evaluator:...
+eval.repeat=1
+eval.subset=full|stratified-10
+eval.baseline_run_id=<id or empty>
+gate.status=pass|fail
+```
+
+**Params:** the same values plus the exact command line, Python version, and
+`pricing.yml` hash. **Artifacts:** `scorecard.md`, `metrics.json`,
+`per_problem.csv`, `failures.md`, `oracle.json`, `mutation.json`, `manifest.json`.
+
+Keep the parent run as the only place gates are evaluated. Nested runs are for
+debuggability, not for rolling up metrics.
+
+### 2.2 Dataset registration and versioning
+
+`prepare --sync-mlflow` maps each CSV row to a GenAI dataset record:
+
+```python
+{
+    "inputs": {
+        "problem_id": 1,
+        "requirement": "<Problem Statement + Constraints + Complexity>",
+        "function_name": "two_sum",
+    },
+    "expectations": {
+        "cases": {"base_case": {...}, "edge_case": {...}, "adversarial_case": {...}},
+        "complexity": "Time: O(N), Space: O(N)",
+        "constraints": "...",
+        "category": "Arrays / Hash Map",
+    },
+    "tags": {"golden_dataset_hash": "<sha256>"},
+}
+```
+
+- Create once with `mlflow.genai.datasets.create_dataset(name="leetcode-golden-v1",
+  experiment_id=<evals experiment>)`; append with `merge_records`.
+- **Idempotency:** compare the dataset digest / recorded `golden_dataset_hash` before
+  merging. `--reset` deletes and recreates for intentional dataset changes.
+- Log `dataset_id`, `dataset_version`, and `dataset_hash` on every eval run.
+- The CSV remains the human-editable source; the MLflow dataset is the evaluation
+  snapshot. Never edit the dataset record by hand.
+
+### 2.3 Scorer mapping (`mlflow.genai.evaluate`)
+
+Grading runs **before** `evaluate`; the evaluation DataFrame carries precomputed
+outputs and grades. This avoids re-running the agent, re-executing untrusted code
+inside MLflow, and double-counting LLM cost.
+
+| # | Scorecard metric | MLflow scorer name | Implementation | Aggregation |
+|---|---|---|---|---|
+| 1 | Golden Strict Solve | `golden_strict_pass` | deterministic, reads precomputed grade | mean |
+| 2 | Case Pass Rate | `golden_case_pass_rate` | deterministic | mean |
+| 3 | False-Pass | `false_pass` | deterministic (internal vs golden) | mean |
+| 4 | False-Fail | `false_fail` | deterministic | mean |
+| 5 | Mutation Score | `mutation_score` | deterministic (mutant matrix) | mean |
+| 6 | Oracle Correctness | `oracle_correctness` | deterministic | mean |
+| 7 | Blame Accuracy | `blame_accuracy` | deterministic | mean |
+| 8 | Constraint Adherence | `constraint_adherence` | deterministic + optional judge | mean |
+| 9 | Infra/Flaky | run-level metrics | `mlflow.log_metrics` | n/a |
+| 10 | Latency/Cost | trace-derived metrics | `mlflow.log_metrics` | p50/p95/sum |
+
+Example shape:
+
+```python
+import mlflow
+from mlflow.genai.scorers import scorer
+
+@scorer(name="golden_strict_pass", aggregations=["mean"])
+def golden_strict_pass(inputs, outputs, expectations):
+    return bool(outputs["grade"]["strict_pass"])
+
+@scorer(name="false_pass", aggregations=["mean"])
+def false_pass(inputs, outputs, expectations):
+    return bool(outputs["internal_passed"] and not outputs["grade"]["strict_pass"])
+
+result = mlflow.genai.evaluate(
+    data=per_problem_df,          # inputs, outputs, expectations
+    scorers=[golden_strict_pass, false_pass, ...],
+)
+```
+
+- `result.metrics` is a cross-check; `metrics.json` from `report.py` remains the
+  canonical scorecard with explicit denominators and Wilson CIs.
+- Optional LLM judge (not a v1 gate): `mlflow.genai.make_judge(...)` or built-in
+  `Correctness` for "is this solution correct?" as a second opinion. Enable with
+  `--llm-judge`; log cost separately.
+
+### 2.4 Per-problem feedback on traces
+
+At grade time, map `output["run_id"]` → `trace_id` with
+`mlflow.search_traces(experiment_ids=[<agent experiment id>],
+filter_string="tags.run_id = '<run_id>'")` and attach one assessment per problem.
+The agent traces live in `leetcodeagent`, while the eval run lives in
+`leetcodeagent-evals`; always pass the agent experiment ID explicitly.
+
+```python
+mlflow.log_feedback(
+    trace_id=trace_id,
+    name="golden_strict_pass",
+    value=False,
+    rationale="adversarial case failed: expected 500500, got 499500",
+    metadata={"problem_id": 9, "case": "adversarial", "batch_id": batch_id},
+)
+```
+
+Also log `internal_pass`, `false_pass`, `oracle_correctness`, `blame_accuracy`,
+`mutation_score`, and `constraint_adherence` as feedback where meaningful. This
+makes failures filterable in the trace UI and turns every solve into a labeled
+example for later judge/optimizer work. If tracing is off or the trace is missing,
+skip feedback and record `trace_id: null` in `run_index.json`.
+
+### 2.5 Metrics, tables, and gates
+
+- `report.py` writes `metrics.json` / `scorecard.md` locally, then:
+  - `mlflow.log_metrics({...})` for the 10 canonical metrics and each slice;
+  - `mlflow.log_table(per_problem_df, artifact_file="per_problem.json")`;
+  - `mlflow.log_table(slice_df, artifact_file="slices.json")`;
+  - `mlflow.log_artifact(...)` for the four report files.
+- Gate results are logged twice: metric `gate.<id>` = `0|1`, and run tag
+  `gate.status=pass|fail` (so `search_runs` can filter).
+- Log the `mlflow.genai.evaluate` result table as `eval_result.json`.
+
+### 2.6 Latency and cost from traces
+
+MLflow 3 exposes aggregated usage directly on `TraceInfo`:
+
+- `trace.info.execution_time_ms` — wall-clock duration.
+- `trace.info.token_usage` — `{input_tokens, output_tokens, total_tokens}`.
+- `trace.info.cost` — `{input_cost, output_cost, total_cost}` (USD).
+
+Use these first. If `token_usage`/`cost` are absent (provider/gateway does not
+report usage), fall back to `evals/pricing.yml` and token counts; if neither is
+available, mark the metric `unavailable` — never log `0`.
+
+### 2.7 Configuration and offline mode
+
+Add an `evals` block to `config.yml`:
+
+```yaml
+evals:
+  experiment: leetcodeagent-evals
+  dataset_name: leetcode-golden-v1
+  log_feedback: true
+  llm_judge: false
+  baseline_run_id: ""
+```
+
+**Required code change:** `AgentConfig` in `src/agent/config.py` uses
+`extra="forbid"`, so adding this YAML block without a model will make every agent
+run fail validation. Add an `EvalsConfig` model (`extra="forbid"`), include it in
+`AgentConfig`, `default_config()` and `_apply_env()`, then add the env overrides
+(`MLFLOW_EVAL_EXPERIMENT`, `MLFLOW_EVAL_DATASET`, `MLFLOW_EVAL_LOG_FEEDBACK`,
+`MLFLOW_EVAL_LLM_JUDGE`, `MLFLOW_EVAL_BASELINE_RUN_ID`) in the same style as the
+existing gateway/model knobs. Add a config test that an unknown `evals` key still
+fails loudly.
+
+Environment overrides follow the existing `MLFLOW_*` convention.
+
+Every MLflow call is wrapped in a best-effort adapter (`src/evals/mlflow_eval.py`)
+with a single `mlflow_enabled` switch. `--no-mlflow` and an unreachable tracking
+server must still produce the local scorecard; the report marks MLflow fields
+`unavailable` and exits successfully (gate failures still exit `1`).
+
+### 2.8 Division of responsibility
+
+| Concern | Owner |
+|---|---|
+| Executing solution/test code | `src/agent/tools/sandbox.py` + `src/evals/runner.py` |
+| Golden/adversarial grading | `src/evals/golden.py` |
+| Per-row scoring, assessments, aggregation | `mlflow.genai.evaluate` + custom scorers |
+| Dataset versioning | `mlflow.genai.datasets` |
+| Trace-level feedback | `mlflow.log_feedback` |
+| Metrics, tables, artifacts, comparison | MLflow run + `report.py` |
+| Gate policy | `evals/gates.yml` + `report.py` |
+
+---
+
+## 3. Target layout
 
 ```
 src/evals/
@@ -52,13 +264,16 @@ src/evals/
   mutation.py             # mutation score
   constraints.py          # constraint + complexity advisory checks
   metrics.py              # scorecard math + CIs
-  ops.py                  # infra/flaky/latency/cost from artifacts + MLflow
+  ops.py                  # infra/flaky/latency/cost from artifacts + traces
+  mlflow_eval.py          # MLflow adapter: dataset sync, evaluate, feedback, logging
+  scorers.py              # @scorer functions over precomputed outputs
   report.py               # scorecard.md / metrics.json / per_problem.csv
   cli.py                  # prepare | run | grade | report | all
 evals/
   golden_dataset.csv
   constraints.yml
   pricing.yml
+  gates.yml               # calibrated thresholds + hard/soft flags
   problems.jsonl          # generated, committed (small)
   results/<batch_id>/     # generated, gitignored
 tests/
@@ -67,7 +282,11 @@ tests/
   test_eval_metrics.py
   test_eval_mutation.py
   test_eval_report.py
+  test_eval_mlflow.py     # mocked tracking server / offline mode
 ```
+
+`config.yml` gains the `evals:` block shown in §2.7. MLflow is optional at runtime
+(`--no-mlflow`), but required for the full scorecard experience.
 
 Run everything with the project's existing convention:
 
@@ -77,7 +296,7 @@ PYTHONPATH=src uv run python -m evals.cli all
 
 ---
 
-## 3. Steps
+## 4. Steps
 
 ### Step 1 — Freeze the metric contract
 
@@ -88,16 +307,21 @@ scorecard metric:
 - numerator and denominator in words;
 - direction (`higher_is_better` / `lower_is_better`);
 - gate value and whether it blocks;
-- required artifacts (run JSON, grade JSON, reference, MLflow).
+- required artifacts (run JSON, grade JSON, reference);
+- `mlflow_metric_key` (e.g. `golden_strict_solve_rate`), `mlflow_feedback_name`
+  (e.g. `golden_strict_pass`), and whether it is a per-problem scorer or a
+  run-level metric;
+- scorer aggregation (`mean`, `min`, `p90`, or none).
 
-Add a `METRICS` dict consumed by `report.py`, so a metric cannot be renamed or
-redefined in one place without the other.
+Add a `METRICS` dict consumed by `report.py` and `scorers.py`, so a metric cannot
+be renamed or redefined in one place without the other.
 
 **Deliverable:** `src/evals/metrics_spec.py` + `plan/eval_plan.md` table above kept
 in sync.
 
 **Done when:** every scorecard number in the final report is traceable to one spec
-entry with an explicit denominator.
+entry with an explicit denominator, and every per-problem metric has a matching
+`@scorer` name and trace feedback name.
 
 ---
 
@@ -118,6 +342,9 @@ entry with an explicit denominator.
   encoding convention (linked lists / trees are lists) so the agent's planner
   contract matches the grader.
 - Record SHA-256 of the CSV in the run manifest.
+- `prepare --sync-mlflow` builds the 50 GenAI dataset records (§2.2) and
+  creates/updates `leetcode-golden-v1` idempotently by digest. Log the returned
+  `dataset_id`, `dataset_version`, and `dataset_hash`; `--reset` recreates it.
 
 `src/evals/adapters.py`:
 
@@ -130,10 +357,12 @@ entry with an explicit denominator.
   `int`/`float` equivalence and a small float tolerance for `find_median_sorted_arrays`.
 - Normalize booleans (`True`/`False`) and empty-string output.
 
-**Deliverable:** validated `evals/problems.jsonl`, dataset hash, adapter registry.
+**Deliverable:** validated `evals/problems.jsonl`, dataset hash, adapter registry,
+and (with `--sync-mlflow`) a versioned `leetcode-golden-v1` dataset.
 
-**Done when:** all 50 rows load, every case produces a valid harness source, and a
-validation failure names the row and field.
+**Done when:** all 50 rows load, every case produces a valid harness source, a
+validation failure names the row and field, and a second `--sync-mlflow` run does
+not create a duplicate dataset version.
 
 ---
 
@@ -201,9 +430,15 @@ PYTHONPATH=src uv run python -m cli \
   --out-dir output/evals --quiet
 ```
 
-- Write `manifest.json`: dataset hash, git SHA, `config.yml` hash, model roles,
-  repeat count, subset, timestamp, command.
-- Write `run_index.json`: problem ID → output path, wall-clock start/end, status.
+- Do **not** create the eval run here; the batch produces agent traces only. The
+  parent `eval_<batch_id>` run is created later by `report` (Step 12), after all
+  grading/mutation metrics exist, so the scorecard lands in one run.
+- Write `manifest.json`: dataset id/version/hash, git SHA, `config.yml` hash, model
+  roles, repeat count, subset, timestamp, command.
+- Write `run_index.json`: problem ID → output path, wall-clock start/end, status,
+  and `trace_id` (resolved with
+  `mlflow.search_traces(experiment_ids=[<agent experiment id>],
+  filter_string="tags.run_id = '<run_id>'")`; `null` when tracing is off).
 - Keep tracing on (needed for cost); do not depend on it for correctness.
 - Support `--subset 1,4,8,14,15,21,27,33,39,45` and `--repeat 3` for the flaky
   subset. Full v1 run = **50 problems × 1 repeat + 10 problems × 3 repeats**.
@@ -211,8 +446,9 @@ PYTHONPATH=src uv run python -m cli \
   Do not add concurrency until the gateway and MLflow tracing are proven safe
   under it.
 
-**Done when:** one command yields 50 per-problem JSONs plus `summary.json`, and a
-2-problem dry run finishes end-to-end with the manifest populated.
+**Done when:** one command yields 50 per-problem JSONs plus `summary.json`,
+`run_index.json` carries trace IDs (or explicit nulls), and a 2-problem dry run
+finishes end-to-end.
 
 ---
 
@@ -227,8 +463,22 @@ PYTHONPATH=src uv run python -m cli \
 - `category_balanced_solve_rate` — macro average across the 40 categories.
 - Wilson 95% CI for each proportion; also emit numerator/denominator.
 
+MLflow wiring:
+
+- Build `per_problem_df` with `inputs` (problem id, requirement), `outputs`
+  (verdicts, scores, code hash, `run_id`), and `expectations` (golden cases,
+  complexity, constraints). Keep `trace_id` in `run_index.json` and attach feedback
+  separately (§2.4) — do not mix a trace column into this DataFrame.
+- Call `mlflow.genai.evaluate(data=per_problem_df, scorers=[golden_strict_pass,
+  golden_case_pass_rate, ...])`; log the returned result table as
+  `eval_result.json`.
+- Log `golden_strict_solve_rate`, `case_pass_rate`, and the three case-type rates
+  with `mlflow.log_metrics`; attach `golden_strict_pass` feedback to each trace
+  (§2.4).
+
 **Done when:** fixture-based unit tests reproduce hand-computed values, including a
-problem that passes base+edge but fails adversarial.
+problem that passes base+edge but fails adversarial, and the MLflow evaluation
+result contains exactly 50 rows with the expected per-row assessments.
 
 ---
 
@@ -251,8 +501,18 @@ kappa           = (agreement - expected_agreement) / (1 - expected_agreement)
 - Report both conditional FP rate and `FP / 50`; the conditional one answers
   "when the agent says pass, how often is it wrong?".
 
+MLflow wiring:
+
+- `@scorer` functions `internal_pass`, `false_pass`, `false_fail` read the
+  precomputed verdicts; aggregate with `mean`.
+- Log `false_pass` / `false_fail` / `internal_pass` feedback per trace with the
+  failing case and test IDs in `rationale`.
+- Log `false_pass_rate`, `false_fail_rate`, `verdict_agreement`, and
+  `cohens_kappa` as run metrics; `false_pass_rate` is a hard gate.
+
 **Done when:** a synthetic fixture with 2 false passes and 1 false fail yields the
-exact expected rates and κ; escaped IDs appear in the report.
+exact expected rates and κ; escaped IDs appear in the report; filtering traces by
+`assessments.false_pass = true` returns exactly those two problems.
 
 ---
 
@@ -276,9 +536,16 @@ For every failed entry in `execution_results`:
   failure is labelled `test`).
 - Emit accuracy, a code/test confusion matrix, and a list of misblamed tests.
 
+MLflow wiring:
+
+- Log `oracle_correctness` and `blame_accuracy` as run metrics and as per-problem
+  `@scorer` values.
+- Attach `blame_accuracy` feedback per trace with `rationale` naming the test ID
+  and whether the code or the expected output was wrong.
+
 **Done when:** a fixture with one wrong expected output and one correct expected
-output produces the expected accuracy, and repaired entries are counted
-deterministically.
+output produces the expected accuracy, repaired entries are counted
+deterministically, and the misblame is visible as trace feedback.
 
 ---
 
@@ -305,8 +572,17 @@ deterministically.
 **Runtime note:** ~2.5k sandboxed runs (50 × 5 mutants × ~10 tests). No LLM calls;
 cache `(mutant_id, test_id)` results in `mutation.json`.
 
+MLflow wiring:
+
+- Log `mutation_score` (micro and macro) as run metrics.
+- Log the full mutant × test kill matrix with
+  `mlflow.log_table(mutation_df, artifact_file="mutation_matrix.json")`.
+- Attach per-problem `mutation_score` feedback to each trace so surviving mutants
+  are visible next to the solve that produced the tests.
+
 **Done when:** reference-vs-reference yields zero killed; a deliberately weak test
-set scores low; the agent's real tests produce a stable score across two runs.
+set scores low; the agent's real tests produce a stable score across two runs; the
+mutation matrix and per-trace feedback are present in the eval run.
 
 ---
 
@@ -328,8 +604,18 @@ and builtin `sorted`/`heapq` usage; compare against the target exponent parsed f
 `match | better | worse | unknown`. Do **not** make this a hard gate in v1 —
 empirical timing in Python is noisy and the dataset has no input generators.
 
+MLflow wiring:
+
+- Log `constraint_adherence` as a run metric and a per-problem scorer.
+- Log the per-rule result table (`rule_id`, `problem_id`, `passed`, `reason`) as
+  `constraints.json`.
+- Optional `--llm-judge`: a `mlflow.genai.make_judge` judge checks constraint
+  extraction from the clarified intent. Log it as a separate advisory metric and
+  never let it change the deterministic score.
+
 **Done when:** every reference solution passes its applicable constraint rules, a
-known violating snippet fails, and the scorecard labels complexity as advisory.
+known violating snippet fails, and the scorecard labels complexity as advisory;
+both the deterministic table and (when enabled) the judge score are in MLflow.
 
 ---
 
@@ -340,25 +626,40 @@ known violating snippet fails, and the scorecard labels complexity as advisory.
 - **Infra error rate:** `status == infra_error` / runs.
 - **Flaky rate:** for the 10-problem × 3-repeat subset, any problem whose strict
   verdict differs across repeats is flaky.
-- **Latency:** p50/p95 wall-clock per run from `run_index.json`. If MLflow spans
-  are available, also emit per-node p50/p95 for `model:heavy/small/critic/testgen/evaluator`.
-- **Cost:** query `mlflow.search_traces(filter_string="tags.run_id = '<id>'")`,
-  sum `mlflow.chat.tokenUsage` over `model:*` spans, multiply by `evals/pricing.yml`
-  (USD per 1M input/output tokens). Emit tokens and cost; `cost_per_solved =
-  total_cost / strict_passes`.
-- If MLflow/token attributes are unavailable, mark latency/cost `unavailable` —
-  never report `0`.
+- **Latency:** p50/p95 wall-clock per run from `run_index.json`, cross-checked
+  with `trace.info.execution_time_ms` from `mlflow.get_trace(trace_id)`.
+- **Cost:** read `trace.info.token_usage` and `trace.info.cost` (MLflow aggregates
+  them from the `model:*` spans). If cost is absent, multiply tokens by
+  `evals/pricing.yml`; if neither exists, mark `unavailable`. Emit
+  `cost_per_solved = total_cost / strict_passes`.
+- Log wall-clock, token, and cost totals plus p50/p95 as run metrics; include
+  `repeat` in the metric key (`latency_p95_r1`, `latency_p95_r2`, ...) so flaky
+  repeats do not overwrite each other.
 - Secondary counters: `fallback_used`, `critic_overruled`, mean `iterations`,
   empty-reply/timeout spans.
 
-**Done when:** a mocked trace produces the expected p95 and cost, and an unavailable
-tracking server degrades to `unavailable` without failing the report.
+**Done when:** a mocked trace with `execution_time_ms`, `token_usage`, and `cost`
+produces the expected p95/cost, and an unavailable tracking server degrades to
+`unavailable` without failing the report.
 
 ---
 
-### Step 12 — Scorecard report, MLflow logging, gates
+### Step 12 — MLflow evaluation run, scorecard, gates
 
-`src/evals/report.py` writes:
+`src/evals/mlflow_eval.py` is the **only** module that talks to MLflow. It exposes a
+small, mockable surface:
+
+```python
+init(experiment: str) -> None
+sync_dataset(records, reset=False) -> DatasetRef      # id, version, digest
+start_eval_run(batch_id, manifest) -> Run
+log_eval(per_problem_df, scorers) -> EvaluationResult # mlflow.genai.evaluate
+log_trace_feedback(run_index, grades) -> None         # mlflow.log_feedback
+log_scorecard(metrics, tables, artifacts) -> None
+finish(gate_status) -> None
+```
+
+`src/evals/report.py` writes the local artifacts first, then calls the adapter:
 
 - `metrics.json` — every metric with value, numerator, denominator, CI, gate, status.
 - `scorecard.md` — the 10-row table plus slice tables and the escaped/failed lists.
@@ -367,24 +668,41 @@ tracking server degrades to `unavailable` without failing the report.
 - `failures.md` — grouped root causes (wrong code, wrong test, timeout, guardrail,
   infra), linking problem IDs.
 
-Log one MLflow run in experiment `leetcodeagent-evals` with params (dataset hash,
-git SHA, config hash, models), metrics, and the artifacts above.
+MLflow sequence (single parent run, no duplicate eval runs):
+
+1. `mlflow.set_experiment("leetcodeagent-evals")`.
+2. `mlflow.start_run(run_name=f"eval_{batch_id}")`; set tags/params from §2.1.
+3. `result = mlflow.genai.evaluate(data=per_problem_df, scorers=SCORERS)` using the
+   precomputed outputs; log `result.tables` as `eval_result.json`.
+4. `mlflow.log_metrics` for the 10 canonical metrics, each slice, and the
+   `gate.<id>` 0/1 values.
+5. `mlflow.log_feedback` for each available `trace_id` (§2.4).
+6. `mlflow.log_table(per_problem_df, "per_problem.json")`,
+   `mlflow.log_table(slice_df, "slices.json")`, `mlflow.log_table(mutation_df,
+   "mutation_matrix.json")`, and `mlflow.log_artifact(...)` for the report files.
+7. Compare with `eval.baseline_run_id` via `mlflow.search_runs`; log delta metrics
+   and a `regressions.json` artifact.
+8. Set tag `gate.status=pass|fail`, print the run URL and the trace-search filter,
+   then end the run.
 
 `src/evals/cli.py` subcommands:
 
 ```bash
-python -m evals.cli prepare                 # validate CSV -> problems.jsonl
-python -m evals.cli run --repeat 1          # agent batch -> output/evals/<batch>
-python -m evals.cli run --subset ... --repeat 3
+python -m evals.cli prepare [--sync-mlflow] [--reset]
+python -m evals.cli run --repeat 1 [--no-mlflow]
+python -m evals.cli run --subset 1,4,8,... --repeat 3
 python -m evals.cli grade --batch <dir>     # golden + calibration + oracle/mutation
-python -m evals.cli report --batch <dir>    # metrics.json + scorecard.md
-python -m evals.cli all                     # full v1 pipeline
+python -m evals.cli report --batch <dir>    # local scorecard + MLflow eval run
+python -m evals.cli all [--llm-judge] [--baseline <run_id>]
 ```
 
-Exit code `1` if a hard gate fails (CI), `0` otherwise. `report` must be idempotent.
+Exit code `1` if a hard gate fails (CI), `0` otherwise. `report` must be idempotent:
+re-running against the same batch updates the same run (or creates a linked run with
+the same `eval.batch_id`) instead of duplicating metrics.
 
-**Done when:** `all` on a fixture batch produces both artifacts and a correct gate
-exit code; re-running produces byte-identical metrics.
+**Done when:** `all` on a fixture batch produces both local artifacts and one MLflow
+run containing the evaluation table, 10 metrics, gate tags, trace feedback, and
+artifacts; `--no-mlflow` produces the same local artifacts with exit code `0`.
 
 ---
 
@@ -393,15 +711,20 @@ exit code; re-running produces byte-identical metrics.
 - Unit tests (no LLM): dataset validation, harness build/parse (empty string,
   bool, float, nested lists), comparison, metric math fixtures, mutant generation,
   blame ground truth, report table formatting.
-- Integration test: two fake agent outputs → grade → metrics → scorecard.
+- MLflow tests with a local SQLite tracking store (`sqlite:///tmp/eval-test.db`):
+  dataset sync idempotency, `@scorer` contract vs `metrics_spec`, `log_feedback`
+  called once per trace, gate metrics/tags, `--no-mlflow` fallback.
+- Integration test: two fake agent outputs → grade → metrics → scorecard → one
+  MLflow run with 2 rows.
 - Slow test, `@pytest.mark.slow`: reference oracle `150/150`. Keep it out of the
   default `pytest -q` path.
 - CI: default tests + oracle check + fixture scorecard. Nightly/manual: full 50-run
   eval (LLM cost).
 - `ruff check src/evals tests`.
 
-**Done when:** `PYTHONPATH=src uv run pytest -q` stays green and the eval package
-has no network/LLM dependency in its default tests.
+**Done when:** `PYTHONPATH=src uv run pytest -q` stays green, the eval package has
+no network/LLM dependency in its default tests, and the MLflow tests pass against a
+local SQLite store with no running server.
 
 ---
 
@@ -409,43 +732,52 @@ has no network/LLM dependency in its default tests.
 
 1. Full run: 50 × 1 repeat.
 2. Flaky run: 10-problem stratified subset × 3 repeats.
-3. Compute the baseline scorecard.
+3. Compute the baseline scorecard and tag the run
+   `eval.role=baseline`; record its run ID in `evals/gates.yml`.
 4. Set gates as **baseline − margin** for hard gates and aspirational targets for
    tracked metrics. Freeze in `evals/gates.yml`.
-5. Triage every escaped problem and every misblame into the backlog.
+5. Configure subsequent runs with `--baseline <run_id>`; `report.py` loads the
+   baseline metrics via `mlflow.search_runs`, computes paired deltas on the same
+   problem IDs, and logs `delta.<metric>` plus `regressions.json`.
+6. Triage every escaped problem and every misblame into the backlog.
 
-**Done when:** a published baseline scorecard exists and the 10 gates in §1 are
-filled with real numbers (not placeholders).
+**Done when:** a published baseline run exists in `leetcodeagent-evals`, the 10
+gates in §1 are filled with real numbers (not placeholders), and a second run shows
+its deltas against the baseline in both the scorecard and the MLflow UI.
 
 ---
 
 ### Step 15 — Documentation and rollout
 
 - Add an **Evals** section to `README.md`: commands, expected runtime/cost, artifact
-  locations, metric definitions, and the "internal vs golden verdict" distinction.
+  locations, metric definitions, the "internal vs golden verdict" distinction, and
+  how to read the MLflow evaluation run (scorecard artifacts, per-row assessments,
+  trace feedback filters, run comparison).
 - Add `evals/README.md`: dataset conventions, reference-solution contract, how to add
-  a problem, how to add a constraint rule.
+  a problem, how to add a constraint rule, and how to sync/reset the MLflow dataset.
 - `.gitignore`: `output/evals/`, `evals/results/`.
-- PR checklist: run `python -m evals.cli all --subset smoke` before merging agent changes.
+- PR checklist: `python -m evals.cli all --subset smoke --no-mlflow` before merging
+  agent changes; full MLflow scorecard on the nightly/manual job.
 
-**Done when:** a new contributor can run the scorecard from a clean checkout without
-reading this plan.
+**Done when:** a new contributor can run the scorecard locally and find the same
+run, dataset version, and per-problem feedback in the MLflow UI from a clean
+checkout without reading this plan.
 
 ---
 
-## 4. Milestones
+## 5. Milestones
 
 | Milestone | Steps | Outcome |
 |---|---|---|
-| **A. Trustworthy inputs** | 1–4 | dataset validated, references pass 150/150, grader works |
-| **B. First real numbers** | 5–6 | full batch + strict/case pass rates |
-| **C. Self-grading audit** | 7–8 | false pass/fail, κ, oracle correctness, blame accuracy |
-| **D. Test strength + gates** | 9–12 | mutation score, constraints, ops, scorecard + CI gate |
-| **E. Baseline + rollout** | 13–15 | tests, calibrated baseline, docs |
+| **A. Trustworthy inputs** | 1–4 | dataset validated + versioned, references pass 150/150, grader works |
+| **B. First real numbers** | 5–6 | full batch, MLflow eval run, strict/case pass rates |
+| **C. Self-grading audit** | 7–8 | false pass/fail, κ, oracle correctness, blame accuracy, trace feedback |
+| **D. Test strength + gates** | 9–12 | mutation matrix, constraints, ops metrics, scorecard + CI gate in MLflow |
+| **E. Baseline + rollout** | 13–15 | tests, baseline run + deltas, docs |
 
 ---
 
-## 5. Risks and decisions to lock now
+## 6. Risks and decisions to lock now
 
 1. **Sandbox payload restrictions.** No `json`, no `repr`, no path-like strings in
    harnesses. Use marker + `print` + `ast.literal_eval`; trusted-harness mode for
@@ -464,18 +796,42 @@ reading this plan.
    document mutation score as a relative signal, not an absolute truth.
 7. **Cost/time.** A full run is LLM-bound and can take hours. Keep the fixture and
    subset paths cheap for CI; reserve the full run for nightly/manual.
-8. **MLflow API drift.** Wrap trace/token queries in a compatibility layer and fail
-   soft to `unavailable`.
+8. **MLflow API drift.** `mlflow.genai` is young (3.17.1 installed). Pin
+   `mlflow>=3.17,<4`, wrap dataset/evaluate/feedback/trace calls in one adapter,
+   and fail soft to `unavailable` so the local scorecard still works.
+9. **Duplicate dataset versions.** `merge_records` appends. Always compare the
+   dataset digest/`golden_dataset_hash` first; require `--reset` for intentional
+   dataset edits, and assert record count == 50 after sync.
+10. **Duplicate eval runs.** `mlflow.genai.evaluate` can create/log its own run.
+    Call it **inside** the parent run and assert exactly one run per `batch_id`;
+    the idempotency test in Step 13 covers this.
+11. **Payload size.** Full code + tests + execution results per row can bloat the
+    evaluation table. Keep `outputs` to verdicts, scores, and code hashes; store the
+    full artifacts separately and link by `run_id`.
+12. **Trace volume.** Per-problem feedback plus gateway usage tracking can grow the
+    backend quickly. Keep gateway usage tracking off (existing README guidance),
+    set a retention policy, and allow `--no-feedback` for large batches.
+13. **Feature availability.** GenAI datasets/feedback need an MLflow 3 tracking
+    server. Local SQLite supports the run/metrics/artifact path but may not support
+    every dataset/feedback API; the adapter must probe once and degrade cleanly.
 
 ---
 
-## 6. Definition of done (v1)
+## 7. Definition of done (v1)
 
 - [ ] All 50 problems normalize; references pass 150/150 golden cases.
+- [ ] `leetcode-golden-v1` is registered and versioned; the eval run records
+  `dataset_id`, `dataset_version`, and `dataset_hash`.
 - [ ] One command runs the batch, grades, and writes `scorecard.md` + `metrics.json`.
 - [ ] All 10 scorecard metrics have a numerator, denominator, CI, and gate.
+- [ ] One MLflow eval run contains the `mlflow.genai.evaluate` result table, the 10
+  canonical metrics, gate tags, per-problem tables, and report artifacts.
+- [ ] Per-problem `golden_strict_pass` (and false-pass/misblame) feedback is attached
+  to the corresponding agent traces.
 - [ ] False-pass list and misblame list are produced, not just aggregate numbers.
-- [ ] Mutation score computed from oracle-valid tests only.
+- [ ] Mutation score computed from oracle-valid tests only; matrix logged to MLflow.
+- [ ] Baseline run is tagged, gates calibrated from it, and a follow-up run shows
+  deltas versus baseline.
+- [ ] `--no-mlflow` produces the same local artifacts and a correct gate exit code.
 - [ ] Eval package tests pass without LLM/network; full eval is marked `slow`.
-- [ ] Baseline scorecard published and gates calibrated from it.
-- [ ] README documents how to reproduce a scorecard.
+- [ ] README documents how to reproduce a scorecard and read the MLflow eval run.

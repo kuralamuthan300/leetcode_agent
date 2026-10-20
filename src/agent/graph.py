@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
+from .config import get_config
 from .nodes import (
     MAX_INTENT_ITERATIONS,
     coder,
@@ -16,7 +17,7 @@ from .state import AgentState
 # The coder no longer self-loops: it produces one solution and hands off to the
 # evaluator. Failures route back through the planner (code at fault) or the
 # tests node (tests at fault) with a single retry.
-MAX_PLANNER_RETRIES = 1
+MAX_PLANNER_RETRIES = get_config().agent.max_planner_retries
 MAX_ITERATIONS = MAX_PLANNER_RETRIES + 1  # 1 original run + 1 retry run
 
 

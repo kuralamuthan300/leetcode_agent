@@ -1,0 +1,52 @@
+# leetcodeagent configuration.
+#
+# Every value can be overridden with an environment variable (env wins over
+# this file). See README.md#configuration for the full env table.
+
+gateway:
+  # MLflow AI gateway (OpenAI-compatible). The endpoint name is passed as the
+  # `model` parameter.
+  base_url: http://127.0.0.1:5000/gateway/mlflow/v1
+  api_key: "" # empty: the gateway handles auth server-side
+  tracking_uri: http://127.0.0.1:5000
+  experiment: leetcodeagent
+
+# One block per model role. `name` must match an MLflow gateway endpoint.
+models:
+  # Planner + coder.
+  heavy:
+    name: nemotron-3-super
+    temperature: 0.2
+    max_tokens: 4096
+    timeout_s: 180
+  # Clarification, scope gate, quiet gather.
+  small:
+    name: gemma4
+    temperature: 0.0
+    max_tokens: 4096
+    timeout_s: 90
+  # Advisory reviewer (verdicts, not essays).
+  critic:
+    name: nemotron-3-super
+    temperature: 0.0
+    max_tokens: 1024
+    timeout_s: 60
+  # Test generation (TDD: expected outputs are load-bearing).
+  testgen:
+    name: nemotron-3-super
+    temperature: 0.0
+    max_tokens: 4096
+    timeout_s: 180
+  # Evaluator-only judge (blame + diagnosis).
+  evaluator:
+    name: nemotron-3-ultra
+    temperature: 0.0
+    max_tokens: 4096
+    timeout_s: 240
+
+# Graph-wide knobs.
+agent:
+  max_intent_iterations: 3
+  max_tests: 10
+  holdout_min_tests: 3
+  max_planner_retries: 1

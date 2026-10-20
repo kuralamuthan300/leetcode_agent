@@ -21,7 +21,7 @@ verifies with generated tests in a sandbox, retries via feedback loop, and write
 - Tests derive from the Planner's CONTRACT (never the Coder's code).
 - `Coder` produces **one** solution (no self-loop), gated + import/`solve()`
   smoke-checked + code-critic, then hands off.
-- `Evaluator` (evaluator-only `nemotron-3-ultra:cloud`) re-runs the full matrix
+- `Evaluator` (evaluator-only `nemotron-3-ultra`) re-runs the full matrix
   (visible + holdout) as the **only** gate, adjudicates each failure, then emits a
   holistic `failure_report` (culprit code|test + reason). `--fail--> Planner` when
   the **code** is at fault (tests retained — the planner skips `TestCaseGen` and
@@ -48,17 +48,22 @@ graph TD
     RunReporter --> End
 ```
 
-## Models (Ollama)
-- Heavy + critic `nemotron-3-super:cloud`; testgen `nemotron-3-super:cloud` with
-  `reasoning=True`; small `gemma4:31b-cloud`; evaluator-only
-  `nemotron-3-ultra:cloud` (blame + diagnosis — used by the evaluator alone).
-- `src/agent/llms.py`: `get_small()` temp 0 / 4096 tokens / 90s timeout,
-  `get_heavy()` temp 0.2 / 180s timeout, `get_critic()` 512 tokens / 60s timeout,
-  `get_testgen()` temp 0 / 4096 tokens / `reasoning` on (env `OLLAMA_TESTGEN`,
-  `OLLAMA_TESTGEN_THINK`), `get_evaluator()` temp 0 / 4096 tokens / `reasoning` on
-  / 240s timeout (env `OLLAMA_EVALUATOR`, `OLLAMA_EVALUATOR_THINK`,
-  `OLLAMA_EVALUATOR_TIMEOUT`).
-- Env: `OLLAMA_HEAVY`, `OLLAMA_SMALL`, `OLLAMA_TESTGEN`, `OLLAMA_EVALUATOR`, `OLLAMA_BASE_URL` (default `http://localhost:11434`).
+## Models (MLflow AI gateway)
+- All roles call the OpenAI-compatible MLflow gateway
+  (`gateway.base_url`, default `http://127.0.0.1:5000/gateway/mlflow/v1`) with
+  the endpoint name as `model`.
+- Heavy + critic `nemotron-3-super`; testgen `nemotron-3-super`; small `gemma4`;
+  evaluator-only `nemotron-3-ultra` (blame + diagnosis — used by the evaluator
+  alone). Reasoning is server-side; the gateway returns final content only.
+- `src/agent/llms.py` builds `ChatOpenAI` clients from `src/agent/config.py`:
+  `get_small()` temp 0 / 4096 tokens / 90s, `get_heavy()` temp 0.2 / 4096 /
+  180s, `get_critic()` temp 0 / 1024 / 60s, `get_testgen()` temp 0 / 4096 /
+  180s, `get_evaluator()` temp 0 / 4096 / 240s.
+- `config.yml` holds `gateway`, per-role `models` and `agent` knobs; env vars
+  (`MLFLOW_HEAVY`, `MLFLOW_SMALL`, `MLFLOW_CRITIC`, `MLFLOW_TESTGEN`,
+  `MLFLOW_EVALUATOR`, `MLFLOW_GATEWAY_URL`, `MLFLOW_TRACKING_URI`, …) override it.
+- `src/agent/tracing.py` sets the tracking URI + experiment and enables
+  `mlflow.langchain.autolog(log_traces=True)` from `cli.main()`.
 
 ## State (`src/agent/state.py`)
 `run_id, requirement, gather_mode (interactive|quiet), status (ok|assumed|aborted|infra_error),`
@@ -96,7 +101,7 @@ graph TD
    call-smoke (fails only on NameError/ImportError); bounded repairs (sig-fix or
    smoke-fix, then one critic regen). **No self-loop**: it emits one `code`
    (+ `coder_smoke`, `guardrail_report`) and hands off to the evaluator.
-5. Evaluator (evaluator-only `nemotron-3-ultra:cloud`): re-runs every harness
+5. Evaluator (evaluator-only `nemotron-3-ultra`): re-runs every harness
    (visible + holdout) via gated `run_python` as the **only authoritative gate**;
    compares stdout to expected; adjudicates failures (`adjudicate()`: contract
    violations ⇒ test, else evaluator verdict) with per-result `blame`; repairs
@@ -144,7 +149,7 @@ Implementation: `src/agent/tools/guardrail.py`, `src/agent/errors.py`
 + `tests/test_guardrails.py`, `test_language.py`, `test_scope.py`.
 
 ## Project setup (uv)
-- `pyproject.toml`: `langgraph, langchain-ollama, langchain-core, pydantic, rich`; dev `pytest, ruff`.
+- `pyproject.toml`: `langgraph, langchain-openai, langchain-core, pydantic, pyyaml, rich, mlflow`; dev `pytest, ruff`.
 - Layout: `src/agent/{state,llms,prompts,nodes,graph,errors,tools/sandbox,tools/guardrail}.py`, `src/cli.py`,
   `tests/{test_graph,test_sandbox,test_intent,test_toolbox,test_guardrails,test_nodes,test_cli,test_scope,test_language,test_smoke,test_reporter,test_session}.py`, `output/.gitkeep`, `plan/`.
 - Verify: `uv sync`, `PYTHONPATH=src uv run pytest -q` (103 passed),

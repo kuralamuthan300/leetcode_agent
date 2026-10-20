@@ -17,6 +17,11 @@ registry.jsonl
 # Local env
 .env
 
+# MLflow local store (tracking server data)
+mlflow.db
+mlruns/
+mlartifacts/
+
 # OpenCode local plugin deps (auto-commit runs from source)
 .opencode/plugins/*/node_modules/
 .opencode/plugins/*/package-lock.json

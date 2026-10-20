@@ -34,7 +34,7 @@ expected + error snippets in `feedback`; `iterations++`.
 Verify: pass + fail-retry cases (`tests/test_nodes.py`).
 
 ## Step 7 — Resilience [done]
-Timeouts (small 90s, heavy 180s via Ollama client); heavy→small fallback with
+Timeouts (small 90s, heavy 180s via the gateway client); heavy→small fallback with
 `fallback_used` flag in state/output (`try_invoke_with_fallback`, planner+coder);
 planner→[tests,coder] fan-out ran parallel in LangGraph *(later replaced by the
 sequential chain in Step 12)*.
@@ -74,11 +74,11 @@ reporter JSON (`tests/test_reporter.py` asserts exact schema).
 Always-confirm on TTY (understanding + assumptions, Enter accepts, free-text
 corrects, max 2 rounds); disambiguation-only questions. Session memory
 (`session.py`, `--fresh`, `session_notes`) removed — every run starts fresh.
-Heavy model switched to `nemotron-3-super:cloud` (small/critic stay gemma4).
+Heavy model switched to `nemotron-3-super` (small/critic stay gemma4).
 
 ## Step 15 — TDD ordering + coder self-loop + blame-aware routing [done]
 `planner → tests → coder → evaluator`: testgen derives from the CONTRACT (never
-the coder's code) on the reasoning model (`get_testgen`, `OLLAMA_TESTGEN*`),
+the coder's code) on the testgen model (`get_testgen`, `MLFLOW_TESTGEN*`),
 splits off a coder-hidden holdout test, and consumes `feedback`. Coder runs a
 bounded self-loop (≤3 retries, `coder_iterations`) against the visible tests
 with deterministic blame — retries on code failures, escalates when the test is
@@ -133,7 +133,7 @@ tests/test_intent.py tests/test_cli.py`.
 Removed the coder's inner self-loop (`_route_coder`, `coder_status`,
 `coder_iterations`, `coder_checks`): the coder now writes one solution and hands
 straight to the evaluator (`coder → evaluator`). The evaluator runs on a new
-evaluator-only model `nemotron-3-ultra:cloud` (`get_evaluator`, `OLLAMA_EVALUATOR*`)
+evaluator-only model `nemotron-3-ultra` (`get_evaluator`, `MLFLOW_EVALUATOR*`)
 — used nowhere else — via `adjudicate()` (per-test) + `diagnose()` (holistic:
 reads the code + failures → `{culprit, reason}`), emitting
 `failure_report{culprit,reason,failing[]}`, `next_action`, and a readable
@@ -145,3 +145,17 @@ retry). CLI drops the coder self-check table and adds an evaluator diagnosis
 panel. Verify: `PYTHONPATH=src uv run pytest -q tests/test_nodes.py
 tests/test_adjudicate.py tests/test_cli.py tests/test_reporter.py` (103 tests).
 
+
+## Step 20 — MLflow gateway + config.yml + tracing [done]
+Replaced Ollama with the OpenAI-compatible MLflow AI gateway (single provider):
+`llms.py` now builds `ChatOpenAI` clients against `gateway.base_url` with the
+endpoint name as `model` (`gemma4`, `nemotron-3-super`, `nemotron-3-ultra`).
+All model/gateway/graph settings moved to `config.yml`, loaded and validated by
+`src/agent/config.py` (Pydantic; defaults → YAML → `MLFLOW_*` env overrides).
+Ollama-only `reasoning`/`num_predict` flags dropped — budgets are expressed as
+`max_tokens`, and empty replies (reasoning eating the budget) are logged with
+`finish_reason`. Added `src/agent/tracing.py` (`mlflow.langchain.autolog` for
+LangGraph + LLM spans, experiment default `leetcodeagent`) called from
+`cli.main()`, best-effort and disabled in tests. Verify:
+`PYTHONPATH=src uv run pytest -q` (117 tests) + a live gateway smoke on all five
+roles + a trace readback from the `leetcodeagent` experiment.

@@ -11,35 +11,79 @@ evaluator, which reads the code and the failing tests and decides whether the
 **code** or the **tests** are at fault. Code blame re-runs `Planner → Coder`
 (tests retained); test blame re-runs `TestCaseGen → Evaluator` (code retained).
 One retry overall (1 original run + 1 retry run).
-Models (Ollama): heavy `nemotron-3-super:cloud` (plan/code), testgen
-`nemotron-3-super:cloud` with reasoning on (plan tests), small
-`gemma4:31b-cloud` (clarify), evaluator `nemotron-3-ultra:cloud` (blame +
-diagnosis; used **only** by the evaluator).
+Models (MLflow AI gateway): heavy `nemotron-3-super` (plan/code), testgen
+`nemotron-3-super` (plan tests), small `gemma4` (clarify), critic
+`nemotron-3-super` (advisory review), evaluator `nemotron-3-ultra` (blame +
+diagnosis; used **only** by the evaluator). Every call goes through the
+OpenAI-compatible gateway and is traced to MLflow.
 
 ## Prerequisites
 
 - Python ≥ 3.11, [uv](https://docs.astral.sh/uv/) (`brew install uv`)
-- [Ollama](https://ollama.com) running locally (`ollama serve`)
+- An MLflow server with the AI gateway enabled, exposing the endpoints above
+  (default: `http://127.0.0.1:5000/gateway/mlflow/v1`)
 
 ## Setup
 
 ```bash
 uv sync
-ollama pull nemotron-3-super:cloud
-ollama pull nemotron-3-ultra:cloud
-ollama pull gemma4:31b-cloud
+# gateway endpoints must exist on the MLflow server, named:
+#   gemma4, nemotron-3-super, nemotron-3-ultra
+curl -s http://127.0.0.1:5000/gateway/mlflow/v1/models
 ```
 
-Optional env overrides (`src/agent/llms.py` defaults shown):
+All model, gateway and graph settings live in [`config.yml`](config.yml); the
+file is read from the repo root and can be moved with `MLFLOW_AGENT_CONFIG`.
 
-```bash
-export OLLAMA_HEAVY=nemotron-3-super:cloud OLLAMA_SMALL=gemma4:31b-cloud
-export OLLAMA_TESTGEN=nemotron-3-super:cloud   # testgen model
-export OLLAMA_TESTGEN_THINK=1                  # reasoning on for testgen
-export OLLAMA_EVALUATOR=nemotron-3-ultra:cloud # evaluator-only judge model
-export OLLAMA_EVALUATOR_THINK=1                # reasoning on for the evaluator
-export OLLAMA_BASE_URL=http://localhost:11434
+```yaml
+gateway:
+  base_url: http://127.0.0.1:5000/gateway/mlflow/v1
+  api_key: ""                       # gateway handles auth server-side
+  tracking_uri: http://127.0.0.1:5000
+  experiment: leetcodeagent
+
+models:
+  heavy:     {name: nemotron-3-super, temperature: 0.2, max_tokens: 4096, timeout_s: 180}
+  small:     {name: gemma4,           temperature: 0.0, max_tokens: 4096, timeout_s: 90}
+  critic:    {name: nemotron-3-super, temperature: 0.0, max_tokens: 1024, timeout_s: 60}
+  testgen:   {name: nemotron-3-super, temperature: 0.0, max_tokens: 4096, timeout_s: 180}
+  evaluator: {name: nemotron-3-ultra, temperature: 0.0, max_tokens: 4096, timeout_s: 240}
+
+agent:
+  max_intent_iterations: 3
+  max_tests: 10
+  holdout_min_tests: 3
+  max_planner_retries: 1
 ```
+
+Environment variables override the file (highest precedence):
+
+| Env var | Overrides |
+| --- | --- |
+| `MLFLOW_GATEWAY_URL` | `gateway.base_url` |
+| `MLFLOW_GATEWAY_API_KEY` | `gateway.api_key` |
+| `MLFLOW_TRACKING_URI` | `gateway.tracking_uri` (standard MLflow var) |
+| `MLFLOW_EXPERIMENT_NAME` | `gateway.experiment` |
+| `MLFLOW_HEAVY` / `MLFLOW_SMALL` / `MLFLOW_CRITIC` / `MLFLOW_TESTGEN` / `MLFLOW_EVALUATOR` | role model (endpoint) name |
+| `MLFLOW_<ROLE>_TEMPERATURE` / `_MAX_TOKENS` / `_TIMEOUT` | role knobs, e.g. `MLFLOW_HEAVY_MAX_TOKENS` |
+| `MLFLOW_MAX_INTENT_ITERATIONS` / `MLFLOW_MAX_TESTS` / `MLFLOW_HOLDOUT_MIN_TESTS` / `MLFLOW_MAX_PLANNER_RETRIES` | graph knobs |
+| `MLFLOW_AGENT_CONFIG` | path to this YAML file |
+| `MLFLOW_TRACING_DISABLED=1` | turn tracing off |
+| `MLFLOW_EXPERIMENT_ID` | use an existing experiment (skips `set_experiment`) |
+
+Token budgets matter: reasoning tokens count against `max_tokens` on the
+gateway, so a budget that is too small yields empty `content` (logged as
+`empty <role> reply (finish_reason=length)`).
+
+### Tracing
+
+`cli.main()` calls `agent.tracing.init_tracing()`, which points MLflow at
+`gateway.tracking_uri`, selects the `gateway.experiment` (default
+`leetcodeagent`), and enables `mlflow.langchain.autolog(log_traces=True)`.
+LangGraph nodes and every `ChatOpenAI` call are captured automatically — no
+per-node decorators. Traces are visible in the MLflow UI at
+`http://127.0.0.1:5000` under the configured experiment. Tracing is
+best-effort: if the tracking server is down the solve continues with a warning.
 
 ## Run
 
@@ -53,7 +97,7 @@ PYTHONPATH=src uv run python -m cli ...    # run the agent inside that venv
 
 `uv run` executes inside the project's managed `.venv` (no manual
 `source .venv/bin/activate` needed), resolving dependencies from `uv.lock`.
-Set the model env vars above first if you want to override the defaults.
+Edit `config.yml` (or set the env vars above) to change models or endpoints.
 
 ### Run modes
 
@@ -129,12 +173,13 @@ JSON), `1` for infra failures, `2` for bad input.
 ## Test
 
 ```bash
-PYTHONPATH=src uv run pytest -q   # 103 tests (hermetic fallbacks + live-graph E2E)
+PYTHONPATH=src uv run pytest -q   # 117 tests (hermetic fallbacks + live-graph E2E)
 ```
 
 ## Layout
 
-- `src/agent/{state,llms,prompts,nodes,graph}.py` — state, models, prompts, nodes, graph
+- `config.yml` — gateway, per-role models/knobs, graph limits
+- `src/agent/{state,llms,prompts,nodes,graph,config,tracing}.py` — state, model factory, config loader, prompts, nodes, graph, tracing
 - `src/agent/tools/{sandbox,guardrail}.py` — gated `python_sandbox` tool + AST security gate
 - `src/cli.py` — terminal entrypoint
 - `plan/{architecture,plans,plan,guardrails}.md` — design docs

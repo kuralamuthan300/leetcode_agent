@@ -7,7 +7,10 @@ nodes can fall back to deterministic behavior (tests stay hermetic / offline).
 from __future__ import annotations
 
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 SOLVE_CONTRACT = (
     "Define plain top-level Python code. The entry point MUST be a top-level "
@@ -214,6 +217,22 @@ def _contract_brief_fallback(sig: str, arg_spec: list) -> str:
     return "\n".join(lines)
 
 
+def _message_text(msg) -> str:
+    """Flatten a chat message's content (str, or a list of content blocks)."""
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text", "")))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return ""
+
+
 def critique(kind: str, artifact: str, context: str = "") -> dict | None:
     """Local-model review. Returns {passed, issues} or None if critic down.
 
@@ -225,7 +244,7 @@ def critique(kind: str, artifact: str, context: str = "") -> dict | None:
     user = f"Checklist:\n{checklists[kind]}\n\nContext:\n{context[:2000]}\n\nArtifact:\n{artifact[:4000]}"
     try:
         msg = llms.get_critic().invoke([("system", CRITIC_SYSTEM), ("human", user)])
-        content = msg.content if isinstance(msg.content, str) else ""
+        content = _message_text(msg)
         verdict = strip_think(content).strip()
     except Exception:
         return None
@@ -287,9 +306,13 @@ def try_invoke(kind: str, user: str, system: str, retries: int = 1) -> str | Non
         try:
             model = getter()
             msg = model.invoke([("system", system), ("human", user)])
-            content = msg.content if isinstance(msg.content, str) else ""
+            content = _message_text(msg)
             if strip_think(content):
                 return strip_think(content)
+            # Reasoning tokens count against max_tokens on the gateway; an
+            # empty reply usually means the budget ran out (finish_reason=length).
+            finish = (getattr(msg, "response_metadata", {}) or {}).get("finish_reason")
+            logger.warning("empty %s reply (finish_reason=%s); retrying", kind, finish)
         except Exception:
             return None
     return None

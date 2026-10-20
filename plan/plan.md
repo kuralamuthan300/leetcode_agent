@@ -63,8 +63,8 @@ gather → planner → tests → coder ─(self-loop ≤3)─→ evaluator ─�
 3. **Testgen** (`nodes.py::test_case_gen`): derive from the contract, consume
    `feedback`, call the reasoning testgen model (`_invoke_testgen`), and split
    off a **holdout** test (≥3 tests) the coder never sees.
-4. **Model** (`llms.py::get_testgen`): heavy model, `temperature=0`,
-   `reasoning=True` (env `OLLAMA_TESTGEN`, `OLLAMA_TESTGEN_THINK`);
+4. **Model** (`llms.py::get_testgen`): testgen model, `temperature=0`
+   (config.yml `models.testgen`; env `MLFLOW_TESTGEN`);
    `prompts.try_invoke` accepts `kind="testgen"`.
 5. **Coder self-loop** (`nodes.py::coder`): after smoke/critic, run the visible
    tests via `run_matrix(adjudicate_failures=False)`; on code-side failure and
@@ -241,8 +241,8 @@ coder from grading itself. One strong model owns judgement; the artifact that is
 
 ### Evaluator-only model
 
-- `llms.get_evaluator()` → `nemotron-3-ultra:cloud` (`OLLAMA_EVALUATOR`,
-  `OLLAMA_EVALUATOR_THINK`, `OLLAMA_EVALUATOR_TIMEOUT=240`), used **only** by the
+- `llms.get_evaluator()` → `nemotron-3-ultra` (`config.yml` `models.evaluator`;
+  `MLFLOW_EVALUATOR`, `MLFLOW_EVALUATOR_TIMEOUT=240`), used **only** by the
   evaluator node. `prompts.try_invoke` gains the `"evaluator"` role;
   `adjudicate()` (per-test blame) and the new `diagnose()` run on it, each falling
   back to the small model / deterministic blame when unavailable (never a stall).

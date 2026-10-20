@@ -16,7 +16,15 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from agent.graph import MAX_ITERATIONS, _route_eval, _route_gather, _route_planner, _route_tests, build_graph
+from agent.graph import (
+    MAX_ITERATIONS,
+    _route_eval,
+    _route_gather,
+    _route_planner,
+    _route_tests,
+    build_graph,
+)
+from agent.tracing import init_tracing
 
 console = Console()
 
@@ -416,7 +424,7 @@ def _run_batch(problems_file: str, out_root: str, show: bool = True) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Solve a DSA problem with LangGraph + Ollama")
+    ap = argparse.ArgumentParser(description="Solve a DSA problem with LangGraph + MLflow")
     src = ap.add_mutually_exclusive_group(required=False)
     src.add_argument("--problem", help="Problem statement inline")
     src.add_argument("--file", help="Path to file with problem statement")
@@ -430,6 +438,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--quiet", action="store_true", help="Status lines only (no code/test panels)")
     ap.add_argument("--verbose", action="store_true", help="Also print the final code and tests")
     args = ap.parse_args(argv)
+
+    if init_tracing():
+        console.print("[dim]MLflow tracing enabled[/dim]")
 
     if args.problems_file:
         if args.gather_mode == "interactive":

@@ -5,7 +5,7 @@ Every LLM call falls back to deterministic behavior so tests stay hermetic.
 
 from __future__ import annotations
 
-from .tools.guardrail import is_truncated
+from .config import get_config
 from .prompts import (
     CODER_REPAIR_SYSTEM,
     CODER_SYSTEM,
@@ -24,10 +24,12 @@ from .prompts import (
     try_invoke,
     try_invoke_with_fallback,
 )
+from .tools.guardrail import is_truncated
 
-MAX_INTENT_ITERATIONS = 3
-MAX_TESTS = 10
-HOLDOUT_MIN_TESTS = 3  # only split off a holdout when this many tests exist
+_AGENT = get_config().agent
+MAX_INTENT_ITERATIONS = _AGENT.max_intent_iterations
+MAX_TESTS = _AGENT.max_tests
+HOLDOUT_MIN_TESTS = _AGENT.holdout_min_tests  # only split off a holdout when this many tests exist
 
 _CLEAR_KEYWORDS = (
     "input",

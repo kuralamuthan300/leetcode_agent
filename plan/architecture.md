@@ -63,7 +63,11 @@ graph TD
   (`MLFLOW_HEAVY`, `MLFLOW_SMALL`, `MLFLOW_CRITIC`, `MLFLOW_TESTGEN`,
   `MLFLOW_EVALUATOR`, `MLFLOW_GATEWAY_URL`, `MLFLOW_TRACKING_URI`, …) override it.
 - `src/agent/tracing.py` sets the tracking URI + experiment and enables
-  `mlflow.langchain.autolog(log_traces=True)` from `cli.main()`.
+  `mlflow.langchain.autolog(log_traces=True)` from `cli.main()`. LLM spans are
+  role-named (`model:heavy`, …), the reporter renames the trace to
+  `<run_id> · <problem>` (`mlflow.traceName`) and adds `run_id`/`status`/
+  `gather_mode`/`eval` tags, and the CLI prints a deep link to the trace.
+  `--no-tracing` / `MLFLOW_TRACING_DISABLED=1` opt out.
 
 ## State (`src/agent/state.py`)
 `run_id, requirement, gather_mode (interactive|quiet), status (ok|assumed|aborted|infra_error),`

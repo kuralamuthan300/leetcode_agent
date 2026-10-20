@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import sys
 import threading
@@ -24,7 +25,7 @@ from agent.graph import (
     _route_tests,
     build_graph,
 )
-from agent.tracing import init_tracing
+from agent.tracing import init_tracing, last_trace_id, trace_url
 
 console = Console()
 
@@ -250,6 +251,13 @@ def _narrator(node: str | None, elapsed: float) -> Text:
     return Text(f" {node or 'working'}: {phrase}  ({int(elapsed)}s)", style="cyan")
 
 
+def _print_trace_link(trace_id: str | None) -> None:
+    """Print a deep link to the run's MLflow trace (no-op when tracing is off)."""
+    url = trace_url(trace_id)
+    if url:
+        console.print(f"[dim]trace: {url}[/dim]", soft_wrap=True)
+
+
 def _produce(graph, state: dict, updates: queue.Queue) -> None:
     """Background producer: stream node updates into the queue, always ending with a sentinel."""
     try:
@@ -258,6 +266,7 @@ def _produce(graph, state: dict, updates: queue.Queue) -> None:
     except Exception as exc:  # noqa: BLE001 - surface the error on the main thread
         updates.put(("error", exc))
     finally:
+        updates.put(("trace", last_trace_id()))
         updates.put(("done", None))
 
 
@@ -304,6 +313,7 @@ def _run_graph(graph, state: dict, show: bool = True) -> dict:
                 started = time.monotonic()
                 attempt = _render_patch(node, patch, show, attempt, elapsed)
                 final.update(patch)
+        _print_trace_link(last_trace_id())
         return final
 
     # Interactive: drain the graph from a worker thread so the main thread can
@@ -314,6 +324,7 @@ def _run_graph(graph, state: dict, show: bool = True) -> dict:
     threading.Thread(target=_produce, args=(graph, state, updates), daemon=True).start()
     current: list[str | None] = ["gather"]
     node_started = [time.monotonic()]
+    trace_id: list[str | None] = [None]
     spinner = Spinner("dots")  # persistent: a fresh Spinner each render would freeze
 
     def tick():
@@ -325,6 +336,9 @@ def _run_graph(graph, state: dict, show: bool = True) -> dict:
             kind, payload = updates.get()
             if kind == "done":
                 break
+            if kind == "trace":
+                trace_id[0] = payload
+                continue
             if kind == "error":
                 console.print(f"[red]✗ stream error: {payload!r}[/red]")
                 break
@@ -336,6 +350,7 @@ def _run_graph(graph, state: dict, show: bool = True) -> dict:
                 current[0] = _next_node(name, final)
                 node_started[0] = time.monotonic()
             live.refresh()
+    _print_trace_link(trace_id[0])
     return final
 
 
@@ -437,8 +452,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--quiet", action="store_true", help="Status lines only (no code/test panels)")
     ap.add_argument("--verbose", action="store_true", help="Also print the final code and tests")
+    ap.add_argument("--no-tracing", action="store_true", help="Disable MLflow tracing for this run")
     args = ap.parse_args(argv)
 
+    if args.no_tracing:
+        os.environ["MLFLOW_TRACING_DISABLED"] = "1"
     if init_tracing():
         console.print("[dim]MLflow tracing enabled[/dim]")
 

@@ -85,6 +85,34 @@ per-node decorators. Traces are visible in the MLflow UI at
 `http://127.0.0.1:5000` under the configured experiment. Tracing is
 best-effort: if the tracking server is down the solve continues with a warning.
 
+A run trace is made readable on purpose:
+
+- The trace is **named** `<run_id> · <problem snippet>` (via the reserved
+  `mlflow.traceName` tag) instead of `LangGraph`, and carries searchable tags
+  `run_id`, `status`, `gather_mode`, `eval` (e.g. `4/4`).
+- LLM spans are named by **role** — `model:heavy`, `model:small`,
+  `model:critic`, `model:testgen`, `model:evaluator` — so identical
+  `ChatOpenAI` calls are no longer ambiguous.
+- The CLI prints a deep link after every run:
+  `trace: http://127.0.0.1:5000/#/experiments/<id>/traces/<trace_id>`.
+
+Find a specific run:
+
+```bash
+# in the MLflow UI search bar, or via the SDK:
+mlflow.search_traces(filter_string="tags.run_id = 'run_id_demo'")
+```
+
+**Gateway trace volume.** MLflow gateway endpoints default to
+`usage_tracking: true`, which writes one trace per proxied LLM call into
+`gateway/<endpoint>` experiments (`gateway/nemotron-3-super`, `gateway/gemma4`,
+`gateway/nemotron-3-ultra`). Those grow fast and drown out agent traces. To
+quiet them: MLflow UI → **Gateway** → open the endpoint → turn **Usage
+tracking** off (repeat for all three endpoints) and delete the stale
+`gateway/*` experiments. Nothing is lost for agent debugging — the agent's
+`model:<role>` spans already record model, token usage, and cost. Env overrides:
+`MLFLOW_TRACING_DISABLED=1` or `--no-tracing` disable tracing entirely.
+
 ## Run
 
 The CLI lives in `src/` (it is not an installed package), so every invocation is
@@ -110,6 +138,7 @@ Edit `config.yml` (or set the env vars above) to change models or endpoints.
 | Pin the run id | `... --run-id run_id_demo` | Fixes the output filename → `output/run_id_demo.json`. |
 | Status lines only | `... --quiet` | No code/test/diagnosis panels; per-node status lines only. |
 | Full dump | `... --verbose` | Also prints the final code, tests and holdout at the end. |
+| No tracing | `... --no-tracing` | Skip MLflow tracing for this run (same as `MLFLOW_TRACING_DISABLED=1`). |
 | Headless gather | `... --gather-mode quiet` | Validate once, never prompt (auto-default when piped). |
 | Interactive gather | `... --gather-mode interactive` | Force the confirm-and-correct gate even when piped. |
 | Custom output root | `... --out-dir runs/` | Writes `runs/<run_id>.json` instead of `output/`. |

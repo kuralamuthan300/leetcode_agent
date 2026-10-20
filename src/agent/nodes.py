@@ -25,6 +25,7 @@ from .prompts import (
     try_invoke_with_fallback,
 )
 from .tools.guardrail import is_truncated
+from .tracing import tag_run
 
 _AGENT = get_config().agent
 MAX_INTENT_ITERATIONS = _AGENT.max_intent_iterations
@@ -771,4 +772,5 @@ def run_reporter(state: dict) -> dict:
     path = Path(state.get("out_dir") or "output") / f"{run_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2))
+    tag_run(state)
     return {"output_path": str(path)}

@@ -17,6 +17,7 @@ def test_all_roles_point_at_mlflow_gateway():
         model = getter()
         expected = config.models[role]
         assert isinstance(model, ChatOpenAI)
+        assert model.name == f"model:{role}"
         assert model.model_name == expected.name
         assert model.openai_api_base == config.gateway.base_url
         assert model.temperature == expected.temperature

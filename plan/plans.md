@@ -159,3 +159,16 @@ LangGraph + LLM spans, experiment default `leetcodeagent`) called from
 `cli.main()`, best-effort and disabled in tests. Verify:
 `PYTHONPATH=src uv run pytest -q` (117 tests) + a live gateway smoke on all five
 roles + a trace readback from the `leetcodeagent` experiment.
+
+## Step 21 — Readable traces (role span names, run naming, trace links) [done]
+Tracing now reads like the graph instead of a raw autolog dump: `llms._make`
+passes `name="model:<role>"` so LLM spans are `model:heavy`/`model:small`/…
+rather than five identical `ChatOpenAI` spans; `tracing.tag_run(state)` (called
+by `run_reporter`) sets the reserved `mlflow.traceName` tag to
+`<run_id> · <problem>` plus `run_id`/`status`/`gather_mode`/`eval` tags and
+compact request/response previews; `cli` captures the trace id in both streaming
+paths and prints a deep link, with a new `--no-tracing` flag. Documented that
+gateway endpoints default to `usage_tracking: true` and should have it disabled
+in the UI to stop `gateway/<endpoint>` trace volume (agent spans already carry
+model + token usage). Verify: `PYTHONPATH=src uv run pytest -q` and one live run
+(trace name, role spans, tags, printed URL).

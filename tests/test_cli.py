@@ -456,3 +456,38 @@ def test_batch_missing_file_exit_two(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "build_graph", lambda: object())
     assert cli.main(["--problems-file", str(tmp_path / "nope.jsonl")]) == 2
 
+
+
+def test_main_no_tracing_flag_disables_tracing(monkeypatch):
+    import os
+
+    import cli
+
+    monkeypatch.delenv("MLFLOW_TRACING_DISABLED", raising=False)
+    seen = {}
+
+    def fake_init():
+        seen["disabled"] = os.getenv("MLFLOW_TRACING_DISABLED")
+        return False
+
+    monkeypatch.setattr(cli, "init_tracing", fake_init)
+    monkeypatch.setattr(cli, "build_graph", lambda: object())
+    monkeypatch.setattr(cli, "_run_graph", lambda graph, state, show=True: {"status": "ok"})
+
+    assert cli.main(["--problem", "Return the sum.", "--no-tracing", "--quiet"]) == 0
+    assert seen["disabled"] == "1"
+
+
+def test_run_graph_prints_trace_link(monkeypatch):
+    import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "last_trace_id", lambda: "tr-1")
+    monkeypatch.setattr(cli, "trace_url", lambda tid: f"http://mlflow/#/traces/{tid}")
+
+    class FakeGraph:
+        def stream(self, state, stream_mode=None):
+            yield {"reporter": {"output_path": "output/z.json"}}
+
+    cli._run_graph(FakeGraph(), {"run_id": "r"})
+    assert "trace: http://mlflow/#/traces/tr-1" in _strip_ansi(buf.getvalue())

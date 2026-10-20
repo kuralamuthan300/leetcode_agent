@@ -28,6 +28,8 @@ def _make(role: str) -> ChatOpenAI:
         base_url=gateway.base_url,
         # The gateway needs no key; OpenAI's client rejects None.
         api_key=gateway.api_key or "not-needed",
+        # MLflow uses the runnable name as the span name.
+        name=f"model:{role}",
         temperature=settings.temperature,
         max_tokens=settings.max_tokens,
         timeout=settings.timeout_s,

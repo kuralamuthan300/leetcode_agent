@@ -41,3 +41,6 @@ mlartifacts/
 # Agent run artifacts (keep dir)
 output/*.json
 !output/.gitkeep
+output/evals/
+evals/results/
+evals/problems.jsonl

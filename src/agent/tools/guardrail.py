@@ -7,10 +7,13 @@ file/network/OS access, introspection escapes, and oversized payloads.
 from __future__ import annotations
 
 import ast
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 MAX_CODE_CHARS = 15_000
 MAX_HARNESS_CHARS = 5_000
+# Dataset harnesses are trusted: golden adversarial inputs are legitimate large
+# literals (~320 KB), so only the untrusted path keeps the small budget.
+MAX_TRUSTED_HARNESS_CHARS = 2_000_000
 
 IMPORT_ALLOW = frozenset(
     {"math", "typing", "collections", "itertools", "functools", "heapq", "bisect"}
@@ -32,7 +35,7 @@ DENY_NAMES = frozenset(    {
 )
 
 
-def _check_tree(tree: ast.AST) -> list[str]:
+def _check_tree(tree: ast.AST, *, allow_path_like_strings: bool = False) -> list[str]:
     reasons: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -53,19 +56,25 @@ def _check_tree(tree: ast.AST) -> list[str]:
                 reasons.append(f"blocked attribute: {node.attr}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             v = node.value
-            if v.startswith("/") or v.startswith("~") or ".." in v:
+            if not allow_path_like_strings and (
+                v.startswith(("/", "~")) or ".." in v
+            ):
                 reasons.append(f"blocked path-like string: {v[:40]!r}")
     return reasons
 
 
-def check(code: str, harness: str = "") -> dict:
+def check(code: str, harness: str = "", *, trusted_harness: bool = False) -> dict:
     """Return {allowed, reasons}. Never raises; unparseable size violations fail closed."""
     reasons: list[str] = []
     if len(code) > MAX_CODE_CHARS:
         reasons.append(f"code exceeds {MAX_CODE_CHARS} chars")
-    if len(harness) > MAX_HARNESS_CHARS:
-        reasons.append(f"harness exceeds {MAX_HARNESS_CHARS} chars")
-    for label, src in (("code", code), ("harness", harness)):
+    max_harness = MAX_TRUSTED_HARNESS_CHARS if trusted_harness else MAX_HARNESS_CHARS
+    if len(harness) > max_harness:
+        reasons.append(f"harness exceeds {max_harness} chars")
+    for label, src, allow_paths in (
+        ("code", code, False),
+        ("harness", harness, trusted_harness),
+    ):
         if not src.strip():
             continue
         try:
@@ -73,14 +82,17 @@ def check(code: str, harness: str = "") -> dict:
         except SyntaxError as e:
             reasons.append(f"{label} syntax error: {e}")
             continue
-        reasons.extend(f"{label}: {r}" for r in _check_tree(tree))
+        reasons.extend(
+            f"{label}: {r}"
+            for r in _check_tree(tree, allow_path_like_strings=allow_paths)
+        )
     return {"allowed": not reasons, "reasons": reasons}
 
 
-def report(code: str, harness: str = "") -> dict:
+def report(code: str, harness: str = "", *, trusted_harness: bool = False) -> dict:
     """check() plus timestamp, for state/output (`guardrail_report`)."""
-    result = check(code, harness)
-    result["checked_at"] = datetime.now(timezone.utc).isoformat()
+    result = check(code, harness, trusted_harness=trusted_harness)
+    result["checked_at"] = datetime.now(UTC).isoformat()
     return result
 
 

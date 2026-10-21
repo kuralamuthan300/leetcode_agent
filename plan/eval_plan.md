@@ -20,18 +20,31 @@ outputs so it never re-runs the agent or untrusted code.
 
 These 10 metrics are the deliverable. Every later step exists to compute one of them.
 
-| # | Metric | Formula | Hard gate (initial) |
-|---|---|---|---|
-| 1 | **Golden Strict Solve Rate** | problems with all 3 golden cases passing / 50 | baseline − 5 pts, target ≥ 0.70 |
-| 2 | **Golden Case Pass Rate** | passing cases / 150, split base / edge / adversarial | report; adversarial ≥ 0.60 |
-| 3 | **False-Pass Rate** | internal `eval.passed` but golden fails / internal passes | ≤ 0.05 |
-| 4 | **False-Fail Rate + Verdict κ** | internal fails but golden passes / internal fails; Cohen's κ | ≤ 0.10; κ ≥ 0.70 |
-| 5 | **Mutation Score** | mutants killed / killable mutants | ≥ 0.60 |
-| 6 | **Test Oracle Correctness** | generated tests whose expected output matches reference / all generated tests | ≥ 0.95 |
-| 7 | **Blame Accuracy** | correct `culprit` (code/test) / failures with derivable ground truth | ≥ 0.80 |
-| 8 | **Constraint Adherence** | satisfied per-problem constraint rules / applicable rules (+ complexity advisory) | ≥ 0.90, advisory in v1 |
-| 9 | **Infra Error Rate + Flaky Rate** | `infra_error` / runs; verdict-changing problems / repeated problems | ≤ 0.02; ≤ 0.05 |
-| 10 | **p95 Latency + Cost per Solved Problem** | p95 wall-clock/run; total LLM cost ÷ strict passes | ≤ 360 s; report-only |
+| # | Metric | Spec id | Formula | Hard gate (initial) |
+|---|---|---|---|---|
+| 1 | **Golden Strict Solve Rate** | `golden_strict_solve_rate` | problems with all 3 golden cases passing / 50 | baseline − 5 pts, target ≥ 0.70 |
+| 2 | **Golden Case Pass Rate** | `golden_case_pass_rate` | passing cases / 150, split base / edge / adversarial | report; adversarial ≥ 0.60 |
+| 3 | **False-Pass Rate** | `false_pass_rate` | internal `eval.passed` but golden fails / internal passes | ≤ 0.05 |
+| 4 | **False-Fail Rate + Verdict κ** | `false_fail_rate`, `cohens_kappa` | internal fails but golden passes / internal fails; Cohen's κ | ≤ 0.10; κ ≥ 0.70 |
+| 5 | **Mutation Score** | `mutation_score` | mutants killed / killable mutants | ≥ 0.60 |
+| 6 | **Test Oracle Correctness** | `oracle_correctness` | generated tests whose expected output matches reference / all generated tests | ≥ 0.95 |
+| 7 | **Blame Accuracy** | `blame_accuracy` | correct `culprit` (code/test) / failures with derivable ground truth | ≥ 0.80 |
+| 8 | **Constraint Adherence** | `constraint_adherence` | satisfied per-problem constraint rules / applicable rules (+ complexity advisory) | ≥ 0.90, advisory in v1 |
+| 9 | **Infra Error Rate + Flaky Rate** | `infra_error_rate`, `flaky_rate` | `infra_error` / runs; verdict-changing problems / repeated problems | ≤ 0.02; ≤ 0.05 |
+| 10 | **p95 Latency + Cost per Solved Problem** | `latency_p95`, `cost_per_solved` | p95 wall-clock/run; total LLM cost ÷ strict passes | ≤ 360 s; report-only |
+
+The canonical contract is `src/evals/metrics_spec.py::METRICS`; the table above is
+its human-readable view. Supporting numbers tracked beside these rows (all with
+`primary=False` in `METRICS`) are `pass_at_1`, `pass_at_2`,
+`category_balanced_solve_rate`, `golden_base_case_pass_rate`,
+`golden_edge_case_pass_rate`, `golden_adversarial_case_pass_rate`,
+`false_pass_share`, `verdict_agreement`, `internal_pass_rate`,
+`mutation_score_macro`, `oracle_correctness_agent_tests`,
+`oracle_correctness_holdout_tests`, `complexity_match_rate`, `latency_p50`, and
+`cost_per_solved`. Each spec carries its numerator, denominator, direction, gate,
+blocking flag, required artifacts, MLflow metric key, MLflow scorer/feedback
+names, scope (per-problem vs run-level), and scorer aggregation. A metric cannot
+be renamed or redefined in `report.py`/`scorers.py` without changing the spec.
 
 **Statistics:** n=50 gives roughly ±14 pts at 95% confidence around p=0.5. Report
 Wilson intervals and paired comparisons (McNemar) for config changes; do not chase
@@ -277,6 +290,7 @@ evals/
   problems.jsonl          # generated, committed (small)
   results/<batch_id>/     # generated, gitignored
 tests/
+  test_eval_metrics_spec.py
   test_eval_dataset.py
   test_eval_harness.py
   test_eval_metrics.py
@@ -317,7 +331,11 @@ Add a `METRICS` dict consumed by `report.py` and `scorers.py`, so a metric canno
 be renamed or redefined in one place without the other.
 
 **Deliverable:** `src/evals/metrics_spec.py` + `plan/eval_plan.md` table above kept
-in sync.
+in sync. The registry exports `METRICS` (all numbers), `PRIMARY_METRICS`/
+`CANONICAL_IDS` (the ten scorecard rows), `SCORERS` and `FEEDBACKS` (per-problem
+scorer/feedback mappings), `blocking_metrics()` (all hard gates, including the
+secondary numbers in rows 4 and 9), and helpers for `report.py`/`scorers.py`.
+Contract tests live in `tests/test_eval_metrics_spec.py`.
 
 **Done when:** every scorecard number in the final report is traceable to one spec
 entry with an explicit denominator, and every per-problem metric has a matching

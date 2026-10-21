@@ -990,6 +990,7 @@ def run_reporter(state: dict) -> dict:
         "critic_overruled": state.get("critic_overruled", False),
         "execution_results": state.get("execution_results", []),
         "eval": state.get("eval", {}),
+        "iterations": state.get("iterations", 1),
         "failure_report": state.get("failure_report", {}),
         "next_action": state.get("next_action", ""),
         "feedback": state.get("feedback", ""),

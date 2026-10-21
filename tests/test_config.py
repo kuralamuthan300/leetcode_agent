@@ -21,6 +21,8 @@ def test_repo_config_parses():
     assert loaded.models["critic"].max_tokens >= 1024
     assert loaded.models["evaluator"].timeout_s == 240
     assert loaded.gateway.experiment == "leetcodeagent"
+    assert loaded.evals.experiment == "leetcodeagent-evals"
+    assert loaded.evals.dataset_name == "leetcode-golden-v1"
 
 
 def test_yaml_overrides_partial_roles(tmp_path, monkeypatch):
@@ -57,6 +59,11 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_GATEWAY_URL", "http://gateway.test/v1")
     monkeypatch.setenv("MLFLOW_EXPERIMENT_NAME", "env-experiment")
     monkeypatch.setenv("MLFLOW_TESTS_PER_CATEGORY", "3")
+    monkeypatch.setenv("MLFLOW_EVAL_EXPERIMENT", "evaluation-exp")
+    monkeypatch.setenv("MLFLOW_EVAL_DATASET", "golden-dev")
+    monkeypatch.setenv("MLFLOW_EVAL_LOG_FEEDBACK", "false")
+    monkeypatch.setenv("MLFLOW_EVAL_LLM_JUDGE", "yes")
+    monkeypatch.setenv("MLFLOW_EVAL_BASELINE_RUN_ID", "run-123")
     loaded = load_config(path)
     heavy = loaded.models["heavy"]
     assert heavy.name == "from-env"
@@ -66,6 +73,18 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     assert loaded.gateway.base_url == "http://gateway.test/v1"
     assert loaded.gateway.experiment == "env-experiment"
     assert loaded.agent.tests_per_category == 3
+    assert loaded.evals.experiment == "evaluation-exp"
+    assert loaded.evals.dataset_name == "golden-dev"
+    assert loaded.evals.log_feedback is False
+    assert loaded.evals.llm_judge is True
+    assert loaded.evals.baseline_run_id == "run-123"
+
+
+def test_unknown_evaluation_config_key_rejected(tmp_path):
+    path = tmp_path / "config.yml"
+    path.write_text("evals:\n  unknown_setting: true\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid config"):
+        load_config(path)
 
 
 def test_unknown_role_rejected(tmp_path):

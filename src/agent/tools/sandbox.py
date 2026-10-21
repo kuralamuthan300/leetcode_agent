@@ -58,7 +58,13 @@ def _exec_target(q, src: str, harness: str) -> None:
         q.put({"stdout": out.getvalue()[:MAX_STDOUT_CHARS], "stderr": err.getvalue()[:MAX_STDOUT_CHARS], "error": repr(e)})
 
 
-def run_python(code: str, harness: str = "", timeout_s: int = TIMEOUT_S) -> dict:
+def run_python(
+    code: str,
+    harness: str = "",
+    timeout_s: int = TIMEOUT_S,
+    *,
+    trusted_harness: bool = False,
+) -> dict:
     """Run coder-written `code`, then `harness` in the same namespace.
 
     Guardrail-gated: blocked code never spawns a process; the violation is
@@ -66,7 +72,9 @@ def run_python(code: str, harness: str = "", timeout_s: int = TIMEOUT_S) -> dict
     """
     import multiprocessing as mp
 
-    gate = guardrail_report(code, harness)
+    # Trusted evaluation harnesses may contain path-looking data strings. Only
+    # that harness check is relaxed; the solution always receives the strict gate.
+    gate = guardrail_report(code, harness, trusted_harness=trusted_harness)
     if not gate["allowed"]:
         return {"stdout": "", "stderr": "", "error": "blocked: " + "; ".join(gate["reasons"][:5])}
 

@@ -54,6 +54,24 @@ def test_oversized_rejected():
     assert check("x = 1\n" * 5000)["allowed"] is False
 
 
+def test_large_harness_allowed_only_when_trusted():
+    from agent.tools.guardrail import check
+
+    harness = "print(solve([" + ", ".join(str(i) for i in range(2000)) + "]))"
+    assert len(harness) > 5_000
+    assert check("def solve(xs):\n    return xs", harness)["allowed"] is False
+    assert check("def solve(xs):\n    return xs", harness, trusted_harness=True)["allowed"] is True
+
+
+def test_trusted_harness_still_checks_solution_code():
+    from agent.tools.guardrail import check
+
+    assert (
+        check("open('/etc/passwd').read()", "print(1)", trusted_harness=True)["allowed"]
+        is False
+    )
+
+
 def test_report_has_timestamp():
     from agent.tools import guardrail_report
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # Repo root: src/agent/config.py -> src/agent -> src -> <repo>
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yml"
@@ -56,6 +56,18 @@ class AgentKnobs(BaseModel):
     max_planner_retries: int = 1
 
 
+class EvalsConfig(BaseModel):
+    """Evaluation dataset and reporting settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    experiment: str = "leetcodeagent-evals"
+    dataset_name: str = "leetcode-golden-v1"
+    log_feedback: bool = True
+    llm_judge: bool = False
+    baseline_run_id: str = ""
+
+
 class AgentConfig(BaseModel):
     """Full config tree."""
 
@@ -64,6 +76,7 @@ class AgentConfig(BaseModel):
     gateway: GatewayConfig
     models: dict[str, ModelSettings]
     agent: AgentKnobs
+    evals: EvalsConfig = Field(default_factory=EvalsConfig)
 
 
 def default_config() -> AgentConfig:
@@ -78,6 +91,7 @@ def default_config() -> AgentConfig:
             "evaluator": ModelSettings(name="nemotron-3-ultra", temperature=0.0, max_tokens=4096, timeout_s=240),
         },
         agent=AgentKnobs(),
+        evals=EvalsConfig(),
     )
 
 
@@ -117,6 +131,18 @@ def _env_float(name: str, current: float) -> float:
         return float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _env_bool(name: str, current: bool) -> bool:
+    raw = _env(name)
+    if raw is None:
+        return current
+    normalized = raw.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {raw!r}")
 
 
 def _apply_env(config: AgentConfig) -> AgentConfig:
@@ -159,7 +185,17 @@ def _apply_env(config: AgentConfig) -> AgentConfig:
             ),
         }
     )
-    return AgentConfig(gateway=gw, models=models, agent=knobs)
+    evals = config.evals.model_copy(
+        update={
+            "experiment": _env("MLFLOW_EVAL_EXPERIMENT") or config.evals.experiment,
+            "dataset_name": _env("MLFLOW_EVAL_DATASET") or config.evals.dataset_name,
+            "log_feedback": _env_bool("MLFLOW_EVAL_LOG_FEEDBACK", config.evals.log_feedback),
+            "llm_judge": _env_bool("MLFLOW_EVAL_LLM_JUDGE", config.evals.llm_judge),
+            "baseline_run_id": _env("MLFLOW_EVAL_BASELINE_RUN_ID")
+            or config.evals.baseline_run_id,
+        }
+    )
+    return AgentConfig(gateway=gw, models=models, agent=knobs, evals=evals)
 
 
 def _validate_roles(config: AgentConfig) -> AgentConfig:

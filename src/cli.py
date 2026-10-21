@@ -369,6 +369,7 @@ def _run_batch(problems_file: str, out_root: str, show: bool = True) -> int:
     """
     import io
     import json
+    import time
     from datetime import UTC, datetime
     from pathlib import Path
 
@@ -388,6 +389,7 @@ def _run_batch(problems_file: str, out_root: str, show: bool = True) -> int:
     class_counts: dict[str, int] = {}
     total = 0
     skipped = 0
+    run_records: list[dict] = []
     real.print(f"[bold]batch {batch_id}[/bold] → {out_dir}/")
 
     for i, line in enumerate(raw.splitlines(), 1):
@@ -407,15 +409,31 @@ def _run_batch(problems_file: str, out_root: str, show: bool = True) -> int:
         state = {"run_id": rid, "requirement": requirement, "gather_mode": "quiet", "out_dir": out_dir}
         # Without --verbose, swallow the per-node status lines for batch rows.
         console = real if show else Console(file=io.StringIO(), width=120)
+        started_at = datetime.now(UTC)
+        started_clock = time.monotonic()
+        output_path = ""
         try:
             final = _run_graph(graph, state, show=show)
             status = str(final.get("status") or "ok")
             cls = str(final.get("rejection_class") or "")
+            output_path = str(final.get("output_path") or "")
         except Exception as exc:  # noqa: BLE001 - one bad row must not kill the batch
             status, cls = "infra_error", "infra"
             real.print(f"[red]  {rid}: infra failure {exc!r}[/red]")
         finally:
             console = real
+        ended_at = datetime.now(UTC)
+        run_records.append(
+            {
+                "run_id": rid,
+                "status": status,
+                "rejection_class": cls,
+                "output_path": output_path,
+                "started_at": started_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
+                "duration_s": time.monotonic() - started_clock,
+            }
+        )
 
         status_counts[status] = status_counts.get(status, 0) + 1
         if cls:
@@ -432,6 +450,7 @@ def _run_batch(problems_file: str, out_root: str, show: bool = True) -> int:
         "skipped": skipped,
         "status_counts": status_counts,
         "rejection_class_counts": class_counts,
+        "runs": run_records,
         "yield": {
             "completed": sum(v for k, v in status_counts.items() if k in ("ok", "assumed")),
             "aborted": status_counts.get("aborted", 0),

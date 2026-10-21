@@ -71,6 +71,9 @@ Environment variables override the file (highest precedence):
 | `MLFLOW_AGENT_CONFIG` | path to this YAML file |
 | `MLFLOW_TRACING_DISABLED=1` | turn tracing off |
 | `MLFLOW_EXPERIMENT_ID` | use an existing experiment (skips `set_experiment`) |
+| `MLFLOW_EVAL_EXPERIMENT` / `MLFLOW_EVAL_DATASET` | evaluation experiment and dataset name |
+| `MLFLOW_EVAL_LOG_FEEDBACK` / `MLFLOW_EVAL_LLM_JUDGE` | enable trace feedback / optional judge |
+| `MLFLOW_EVAL_BASELINE_RUN_ID` | baseline run used for comparison |
 
 Token budgets matter: reasoning tokens count against `max_tokens` on the
 gateway, so a budget that is too small yields empty `content` (logged as
@@ -113,6 +116,61 @@ tracking** off (repeat for all three endpoints) and delete the stale
 `gateway/*` experiments. Nothing is lost for agent debugging — the agent's
 `model:<role>` spans already record model, token usage, and cost. Env overrides:
 `MLFLOW_TRACING_DISABLED=1` or `--no-tracing` disable tracing entirely.
+
+## Evals
+
+The evaluation tooling keeps the agent's internal verdict separate from the
+deterministic golden verdict. Start by validating and normalizing
+`evals/golden_dataset.csv`:
+
+```bash
+PYTHONPATH=src uv run python -m evals.cli prepare
+PYTHONPATH=src uv run python -m evals.cli prepare --sync-mlflow
+```
+
+Preparation writes `evals/problems.jsonl` for the existing batch driver and
+prints the SHA-256 digest. `--sync-mlflow` registers the snapshot as
+`leetcode-golden-v1` in the `leetcodeagent-evals` experiment. Repeated syncs with
+the same digest are idempotent; `--reset --sync-mlflow` intentionally recreates
+the dataset.
+
+Run a selected subset (or the full set) sequentially; repeat runs are indexed
+separately for repeatability checks:
+
+```bash
+PYTHONPATH=src uv run python -m evals.cli run --subset 1,4 --repeat 1
+PYTHONPATH=src uv run python -m evals.cli run --subset 1,4,8 --repeat 3 --no-mlflow
+PYTHONPATH=src uv run python -m evals.cli grade --batch evals/results/<batch_id>
+```
+
+Runs and their `manifest.json` / `run_index.json` are written under
+`evals/results/<batch_id>/`. `--no-mlflow` keeps local execution independent of
+the tracking server. `grade` scores each stored solution against the three
+golden cases and writes `grade.json`; `report --batch <dir>` writes scorecard
+artifacts from it. Unavailable metrics are shown as such, never as passing
+gates. See [`evals/README.md`](evals/README.md) for dataset and constraint
+conventions.
+
+The full 50-problem run is sequential and LLM-bound; expect hours rather than
+minutes depending on gateway latency. Cost depends on model pricing and token
+usage, so inspect trace usage/cost in MLflow rather than assuming a fixed
+estimate. The scorecard distinguishes:
+
+- **Golden strict solve rate:** problems passing all three golden cases / problems.
+- **Case pass rate:** golden cases passed / golden cases evaluated, with base,
+  edge, and adversarial slices.
+- **False-pass rate:** internal passes that fail golden / internal passes.
+- **False-fail rate:** internal failures that pass golden / internal failures.
+- **Mutation, oracle, blame, constraint, infra/flaky, latency, and cost metrics:**
+  see the metric contract in `src/evals/metrics_spec.py`; complexity remains an
+  advisory, not a hard gate.
+
+The evaluation MLflow run belongs to `leetcodeagent-evals`. Its artifacts include
+`scorecard.md`, `metrics.json`, `per_problem.csv`, and `failures.md`; use the
+per-row assessments and trace feedback to identify the individual solve. Trace
+tags include `run_id`, and false-pass feedback can be queried by its assessment
+name. Compare a later report with `--baseline <run_id>` to emit metric deltas and
+paired strict-pass regressions.
 
 ## Run
 
@@ -200,6 +258,19 @@ and `yield {completed, aborted, infra}`. A row that fails hard is recorded as
 
 Exit codes: `0` for `ok`/`assumed`/`aborted` (the classification lives in the
 JSON), `1` for infra failures, `2` for bad input.
+
+The golden evaluation CSV can be validated and converted to that JSONL format
+with:
+
+```bash
+PYTHONPATH=src uv run python -m evals.cli prepare
+```
+
+The command writes `evals/problems.jsonl` and prints the source CSV's SHA-256
+digest. Add `--sync-mlflow` to create or update the `leetcode-golden-v1` GenAI
+dataset in the `leetcodeagent-evals` experiment; the same CSV digest is a no-op
+on subsequent runs. Use `--reset --sync-mlflow` only when intentionally
+recreating that MLflow dataset.
 
 ## Test
 

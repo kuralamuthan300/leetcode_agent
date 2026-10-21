@@ -51,3 +51,10 @@ agent:
   tests_per_category: 2
   holdout_min_tests: 3
   max_planner_retries: 1
+
+evals:
+  experiment: leetcodeagent-evals
+  dataset_name: leetcode-golden-v1
+  log_feedback: true
+  llm_judge: false
+  baseline_run_id: ""
